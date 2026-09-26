@@ -1,0 +1,19 @@
+[package]
+name = "aufhebang"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kbvm = "0.2.0"
+rustix = { version = "1.1.5", features = ["mm"] }
+slotmap = "1.1.1"
+thiserror = "2.0.21"
+wayland-client = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53" }
+wayland-protocols = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53", features = [
+    "client",
+    "staging",
+    "unstable",
+] }
+
+[dev-dependencies]
+anyhow = "1.0.104"
