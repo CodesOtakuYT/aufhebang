@@ -53,7 +53,7 @@ fn main() -> Result<()> {
         display.dispatch()?;
         let to_be_removed = display
             .surfaces()
-            .filter(|&id| display.should_close(id).unwrap())
+            .filter(|&id| display.should_close(id))
             .collect::<Vec<_>>();
         if !to_be_removed.is_empty() {
             for id in to_be_removed {
