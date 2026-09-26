@@ -49,8 +49,9 @@ impl Display {
         self.state.surfaces.remove(id)
     }
 
-    pub fn should_close(&self, id: SurfaceId) -> Option<bool> {
-        self.surface(id).map(|s| s.should_close())
+    pub fn should_close(&self, id: SurfaceId) -> bool {
+        self.surface(id)
+            .is_some_and(|surface| surface.should_close())
     }
 
     pub fn surface(&self, id: SurfaceId) -> Option<&Surface> {
