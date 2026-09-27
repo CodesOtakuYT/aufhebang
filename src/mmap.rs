@@ -1,16 +1,17 @@
+//! Mapping a file into memory.
+
 use std::{ffi::c_void, io, os::fd::BorrowedFd};
 
 use rustix::mm::{MapFlags, ProtFlags};
 
 /// A read-only private mapping of a file.
 ///
+/// Only used to read the keymap the compositor sends on a `wl_keyboard.keymap`
+/// fd, and only while that fd is open, so the mapping is not worth exposing.
+///
 /// The file descriptor is only borrowed for the duration of [`Mmap::new`]: the
 /// caller is free to close it as soon as the mapping exists, since the mapping
 /// keeps its own reference to the underlying file.
-/// A read-only private mapping of a file.
-///
-/// Only used to read the keymap the compositor sends on a `wl_keyboard.keymap`
-/// fd, and only while that fd is open, so the mapping is not worth exposing.
 pub(crate) struct Mmap {
     size: usize,
     ptr: *mut c_void,

@@ -1,0 +1,16 @@
+{
+    // The only example needs the `tokio` feature, and `required-features` in
+    // Cargo.toml only tells `cargo build` to skip the target — it does not make
+    // rust-analyzer compile the library with the feature on. Without this,
+    // `src/tokio.rs` is missing from the analyzer's view of the crate and
+    // everything the example imports from it fails to resolve.
+    //
+    // The array is required, not a style choice. The setting is an enum whose
+    // only string form is the literal "all" (meaning --all-features); a named
+    // feature has to go in a list, so `"tokio"` on its own is rejected as an
+    // invalid config value.
+    //
+    // Committed rather than left to each developer's user settings, since
+    // opening `examples/snake.rs` is broken by default otherwise.
+    "rust-analyzer.cargo.features": ["tokio"]
+}

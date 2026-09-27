@@ -6,16 +6,12 @@
 
 use std::os::fd::AsFd;
 
-use kbvm::{
-    GroupIndex, ModifierMask,
-    lookup::LookupTable,
-    xkb::{Keymap, diagnostic::WriteToLog},
-};
+use kbvm::{GroupIndex, ModifierMask, lookup::LookupTable, xkb::diagnostic::WriteToLog};
 use slotmap::new_key_type;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     protocol::{
-        wl_keyboard::WlKeyboard,
+        wl_keyboard::{KeymapFormat, WlKeyboard},
         wl_seat::{self, WlSeat},
     },
 };
@@ -27,7 +23,10 @@ use crate::{
 };
 
 pub(crate) struct Keyboard {
-    keymap: Option<Keymap>,
+    /// The only form of the keymap this crate keeps. A kbvm `Keymap` owns a
+    /// parsed xkb tree, and `LookupTable` is a flattened, self-contained copy of
+    /// the parts of it that a lookup reads, so there is nothing to keep the
+    /// tree alive for and nothing to borrow from it.
     pub(crate) lookup_table: Option<LookupTable>,
     focused_surface: Option<SurfaceId>,
     pub(crate) group: GroupIndex,
@@ -80,7 +79,6 @@ impl Dispatch<WlSeat, State> for SeatId {
         }
 
         seat.keyboard = Some(Keyboard {
-            keymap: Default::default(),
             lookup_table: Default::default(),
             focused_surface: Default::default(),
             group: Default::default(),
@@ -104,27 +102,48 @@ impl Dispatch<WlKeyboard, State> for SeatId {
         _qh: &QueueHandle<State>,
     ) {
         match event {
-            wayland_client::protocol::wl_keyboard::Event::Keymap {
-                format: _,
-                fd,
-                size,
-            } => {
+            wayland_client::protocol::wl_keyboard::Event::Keymap { format, fd, size } => {
+                // `NoKeymap` means the seat has no mapping at all, and
+                // carries no fd worth mapping.
+                if format == KeymapFormat::NoKeymap {
+                    return;
+                }
+
                 // The mapping outlives the fd, so `fd` is closed as soon as this
                 // scope ends.
-                let mmap = Mmap::new(fd.as_fd(), size as usize).unwrap();
-                let keymap = state
+                //
+                // A keymap that cannot be mapped or compiled leaves whatever was
+                // already installed in place, so one the compositor gets wrong
+                // costs the application its input rather than its process. The
+                // reason is already on the log: `WriteToLog` is the diagnostic
+                // sink for the compile that just failed, and a map that cannot
+                // be mapped is not a keymap problem to report here either.
+                let Ok(mmap) = Mmap::new(fd.as_fd(), size as usize) else {
+                    return;
+                };
+                let Ok(keymap) = state
                     .xkb_ctx
                     .keymap_from_bytes(WriteToLog, None, mmap.as_slice())
-                    .unwrap();
+                else {
+                    return;
+                };
+                // The tree itself is dropped here: `build_lookup_table` copies
+                // everything a lookup needs out of it.
                 let lookup_table = keymap.to_builder().build_lookup_table();
                 let Some(keyboard) = state.keyboard_mut(*self) else {
                     return;
                 };
-                keyboard.keymap = Some(keymap);
                 keyboard.lookup_table = Some(lookup_table);
             }
             wayland_client::protocol::wl_keyboard::Event::Enter { surface, .. } => {
-                let surface_id = surface.data::<SurfaceId>().unwrap();
+                // Every surface in this connection is created with a `SurfaceId`
+                // as its user data, so a name that does not carry one is the
+                // compositor violating the protocol. Ignoring the event is
+                // better than aborting the process over it, and it leaves the
+                // previous focus in place rather than inventing one.
+                let Some(surface_id) = surface.data::<SurfaceId>() else {
+                    return;
+                };
                 let Some(keyboard) = state.keyboard_mut(*self) else {
                     return;
                 };
