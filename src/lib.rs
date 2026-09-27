@@ -71,6 +71,26 @@
 //! - [`seat`] — keyboards and keymap translation.
 //! - [`color`] — colours for
 //!   [`Display::add_color`](display::Display::add_color).
+//!
+//! # Re-exports
+//!
+//! The public API speaks these types, so they are re-exported here and you
+//! should get them from this crate rather than declaring them yourself:
+//!
+//! - [`wayland_client`] — [`WlBuffer`](wayland_client::protocol::wl_buffer::WlBuffer)
+//!   from [`add_color`](display::Display::add_color), plus `ConnectError`,
+//!   `DispatchError`, and `ReadEventsGuard`.
+//! - [`wayland_protocols`] — the protocol bindings behind [`surface`].
+//! - [`kbvm`] — the [`KeysymProps`](kbvm::lookup::KeysymProps) from
+//!   [`translate_key`](display::Display::translate_key).
+//! - [`slotmap`] — the machinery behind [`SurfaceId`](surface::SurfaceId) and
+//!   [`SeatId`](seat::SeatId), for side-tables of your own.
+//!
+//! Declaring `wayland-client` yourself is likely to fail: this crate depends on
+//! a pinned git revision, and Cargo treats a different source as a different
+//! crate, so the two `WlBuffer` types will not unify.
+//! `aufhebung::wayland_client` is the same crate this library uses, so the types
+//! always match.
 
 #![cfg_attr(feature = "tokio", doc = "- [`tokio`] — the optional `tokio` feature.")]
 #![deny(unused_must_use)]
@@ -84,3 +104,8 @@ pub mod state;
 pub mod surface;
 #[cfg(feature = "tokio")]
 pub mod tokio;
+
+pub use kbvm;
+pub use slotmap;
+pub use wayland_client;
+pub use wayland_protocols;

@@ -30,7 +30,11 @@ use aufhebung::{
 };
 use rand::Rng as _;
 use tokio::time::MissedTickBehavior;
-use wayland_client::protocol::wl_buffer::WlBuffer;
+
+// Re-exported rather than depended on directly: declaring our own
+// `wayland-client` would have to match this crate's git revision exactly, or
+// the `WlBuffer` types would not unify.
+use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
 
 const GRID: i32 = 20;
 const CELL: i32 = 24;

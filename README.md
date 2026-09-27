@@ -156,6 +156,26 @@ A bare `wl_surface`.
 usual literals.
 `Display::add_color` turns one into a buffer that can be committed to a surface.
 
+### Re-exports
+
+The public API speaks types from `wayland-client`, `wayland-protocols`, `kbvm`,
+and `slotmap`, so all four are re-exported:
+
+```rust
+use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
+use aufhebung::{kbvm, slotmap, wayland_protocols};
+```
+
+`aufhebung` is then the only dependency an application needs to declare.
+
+Do not add `wayland-client` yourself. This crate depends on a pinned git
+revision, and Cargo treats a different source as a different crate, so the two
+`WlBuffer` types will not unify — declaring `wayland-client = "0.31"` produces
+`error[E0308]: mismatched types ... there are multiple different versions of
+crate wayland_client in the dependency graph`.
+Going through the re-export cannot have that problem, because it is the same
+crate this library already uses.
+
 ### Seats
 
 `translate_key` and `translate_char` resolve a key through one seat's keymap and
