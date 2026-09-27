@@ -1,4 +1,4 @@
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use kbvm::Keycode;
 use wayland_client::{
@@ -14,6 +14,44 @@ use crate::{
     state::{Event, State},
     surface::{Surface, SurfaceId, SurfaceInfo},
 };
+
+/// A plain handle to the compositor connection's socket.
+///
+/// This does not borrow the [`Display`] — the descriptor is owned by the
+/// connection — but it is only meaningful while that `Display` is alive, and is
+/// closed with it. It exists for readiness APIs that want an owned value to
+/// poll, such as `tokio`'s `AsyncFd`, which cannot hold a [`BorrowedFd`].
+///
+/// ```
+/// # use aufhebung::display::Display;
+/// # fn demo(display: &Display) -> Result<(), tokio::io::Error> {
+/// let socket = tokio::io::unix::AsyncFd::new(display.socket())?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Socket {
+    fd: RawFd,
+}
+
+// SAFETY: the descriptor is owned by the connection and is only ever read, so
+// sharing a copy of the handle cannot cause two threads to write to it.
+unsafe impl Send for Socket {}
+unsafe impl Sync for Socket {}
+
+impl AsFd for Socket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        // SAFETY: `fd` is a live descriptor owned by the connection, and the
+        // borrow is tied to `&self`, so it cannot outlive the handle.
+        unsafe { BorrowedFd::borrow_raw(self.fd) }
+    }
+}
+
+impl AsRawFd for Socket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
 
 pub struct Display {
     event_queue: EventQueue<State>,
@@ -115,6 +153,40 @@ impl Display {
         self.event_queue.as_fd()
     }
 
+    /// The socket as an owned, copyable handle.
+    ///
+    /// Same descriptor as [`connection_fd`](Self::connection_fd), but detached
+    /// from the `Display`'s lifetime, for readiness APIs that need to own what
+    /// they poll. Keeping the `Display` alive keeps the descriptor valid.
+    pub fn socket(&self) -> Socket {
+        Socket {
+            fd: self.event_queue.as_fd().as_raw_fd(),
+        }
+    }
+
+    /// Commit a buffer to a surface by id, scaled to the surface's current size.
+    ///
+    /// Shorthand for looking the surface up and committing, which most mutation
+    /// is. Returns `false` if the id is no longer live, having changed nothing.
+    pub fn commit(&self, id: SurfaceId, buffer: &WlBuffer) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            surface.commit(buffer);
+            true
+        })
+    }
+
+    /// Whether a buffer may be committed to this surface yet.
+    ///
+    /// `false` only for a toplevel the compositor has not configured yet, where
+    /// attaching a buffer is `xdg_surface.error.unconfigured_buffer`. Use this
+    /// to guard a commit rather than tracking the first
+    /// [`SurfaceEvent::Configure`](crate::state::SurfaceEvent::Configure)
+    /// yourself. Returns `false` if the id is no longer live.
+    pub fn is_configured(&self, id: SurfaceId) -> bool {
+        self.surface(id)
+            .is_some_and(|surface| surface.is_configured())
+    }
+
     /// Claim the right to read from the socket.
     ///
     /// This is the part of a non-blocking dispatch that cannot be folded into a
@@ -169,8 +241,44 @@ impl Display {
         )
     }
 
+    /// The character `key` produces on `seat`, or `None` if it produces none.
+    ///
+    /// Takes the most preferred keysym from [`translate_key`](Self::translate_key)
+    /// and asks kbvm for its character, falling back to a table for keys that
+    /// are not characters: the cursor keys, Return, Escape, Tab, and Backspace.
+    /// That fallback is the point of this method — kbvm's `char()` returns
+    /// `None` for all of them, so an arrow key is invisible without it.
+    ///
+    /// The arrows are a convention of this crate, not a character the keyboard
+    /// produced. If you would rather see the raw keysym, use
+    /// [`translate_key`](Self::translate_key).
+    pub fn translate_char(&self, seat: SeatId, key: u32) -> Option<char> {
+        let props = self.translate_key(seat, key)?.into_iter().next()?;
+        props.char().or_else(|| non_char_keysym(props.keysym().0))
+    }
+
     /// Drain every event queued since the last call.
     pub fn events(&mut self) -> Vec<Event> {
         self.state.events.drain(..).collect()
     }
+}
+
+/// Keysyms that stand for a key rather than for a character.
+///
+/// kbvm's own `char()` has no entry for these, which is why matching on a
+/// keysym was previously the only way to see an arrow key at all.
+fn non_char_keysym(keysym: u32) -> Option<char> {
+    Some(match keysym {
+        // The cursor keys carry no character of their own. The arrows are this
+        // crate's convention for them, not something the keyboard produced.
+        0xff51 => '\u{2190}',    // Left
+        0xff52 => '\u{2191}',    // Up
+        0xff53 => '\u{2192}',    // Right
+        0xff54 => '\u{2193}',    // Down
+        0xff0d | 0xff8d => '\r', // Return, KP_Enter
+        0xff1b => '\u{1b}',      // Escape
+        0xff08 => '\u{8}',       // Backspace
+        0xff09 => '\t',          // Tab
+        _ => return None,
+    })
 }

@@ -69,10 +69,12 @@ compositor has to say how big the window is first.
 
 - **`Display`** — connect, and drive the connection either blocking (`dispatch`) or from any
   readiness API (`connection_fd`, `prepare_read`, `dispatch_pending`, `flush`).
-- **`SurfaceRole`** — `Window { title }` for a toplevel, `Subsurface { parent, x, y }` for a
-  positioned sub-surface, or `None` for a bare `wl_surface`.
-- **`Surface`** — `commit` attaches a buffer and scales it to the surface; `set_position`
-  moves a sub-surface.
+- **`SurfaceRole`** — `Window { title }` for a toplevel, `Subsurface { parent, x, y, sync }`
+  for a positioned sub-surface, or `None` for a bare `wl_surface`.
+- **`Surface`** — `commit` attaches a buffer, scales it to the surface, and damages it in
+  full; `set_position` moves a sub-surface; `is_configured` reports whether a toplevel may
+  carry a buffer yet.
+- **`Display::translate_char`** — a key as a character, including the cursor keys.
 - **`Color`** — 8 bits per channel. `add_color` turns one into a `wl_buffer` that fills a
   surface, which is enough to draw something before you have a buffer pipeline.
 - **`translate_key`** — the compositor's keymap, resolved to keysyms.
@@ -137,11 +139,9 @@ compositor to connect to.
 ## Limitations
 
 - No pointer input, frame callbacks, text input, clipboard, or `wl_output`.
-- Sub-surfaces are always synchronized, so changing one needs a parent commit.
 - Decoration is server-side only, and the mode the compositor settles on is not read back.
-- `translate_key` returns keysyms. Converting one to a character goes through
-  `kbvm::Keysym::char()`, which has no mapping for the cursor keys — arrow keys need a direct
-  `kbvm` dependency.
+- `translate_key` returns keysyms. `translate_char` is the convenient form, but a key that is
+  neither a character nor one of the eight it knows about is still only reachable as a keysym.
 
 ## Requirements
 

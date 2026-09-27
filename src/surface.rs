@@ -24,8 +24,35 @@ new_key_type! {
 
 /// The role to give a new surface.
 pub enum SurfaceRole {
-    Window { title: String },
-    Subsurface { parent: SurfaceId, x: i32, y: i32 },
+    Window {
+        title: String,
+    },
+    Subsurface {
+        parent: SurfaceId,
+        x: i32,
+        y: i32,
+        /// Whether the sub-surface waits for its parent.
+        ///
+        /// `true`, the protocol default, is *synchronized*: a change to the
+        /// sub-surface — its position, its buffer, its damage — is cached until
+        /// the parent is committed, so every change needs a second commit on
+        /// the parent to become visible.
+        ///
+        /// `false` is *desynchronized*: each commit applies on its own. That
+        /// halves the work per change, at the cost of no longer being atomic
+        /// with a change to the parent, so a frame where both must move
+        /// together can tear.
+        ///
+        /// Set at creation because the mode is only read when the sub-surface is
+        /// first committed, which [`Display::add_surface`](crate::display::Display::add_surface)
+        /// has already done by the time it returns.
+        ///
+        /// Prefer `true` unless you have measured otherwise. KWin was observed
+        /// not to apply a sub-surface's cached position from a desynchronized
+        /// commit alone, so with `false` and no parent commit the sub-surface
+        /// stays where it was created.
+        sync: bool,
+    },
     None,
 }
 
@@ -48,6 +75,9 @@ enum SurfaceRoleObject {
         deco: ZxdgToplevelDecorationV1,
         title: String,
         should_close: bool,
+        /// Whether the compositor has sent a configure yet. Until it has, the
+        /// surface may not carry a buffer. See [`Surface::is_configured`].
+        configured: bool,
     },
     Subsurface {
         subsurface: WlSubsurface,
@@ -107,9 +137,10 @@ impl Surface {
                             deco,
                             title,
                             should_close: false,
+                            configured: false,
                         }
                     }
-                    SurfaceRole::Subsurface { x, y, .. } => {
+                    SurfaceRole::Subsurface { x, y, sync, .. } => {
                         let subsurface = globals.subcompositor.get_subsurface(
                             &surface,
                             // Resolved above, and only for this role.
@@ -120,6 +151,15 @@ impl Surface {
                             NoopIgnore,
                         );
                         subsurface.set_position(x, y);
+                        // Both the position and the sync mode are double-buffered
+                        // state, applied when the sub-surface is first committed.
+                        // Setting the mode after that commit has no effect, so it
+                        // has to happen here, before the `surface.commit()` below.
+                        if sync {
+                            subsurface.set_sync();
+                        } else {
+                            subsurface.set_desync();
+                        }
                         SurfaceRoleObject::Subsurface { subsurface }
                     }
                     SurfaceRole::None => SurfaceRoleObject::None,
@@ -146,7 +186,8 @@ impl Surface {
         Some(id)
     }
 
-    /// Attaches `buffer`, scales it to the current size, and commits.
+    /// Attaches `buffer`, scales it to the current size, damages the whole
+    /// surface, and commits.
     ///
     /// A toplevel must be committed in response to [`SurfaceEvent::Configure`],
     /// which is emitted only after the configure has been acked. Committing one
@@ -154,8 +195,28 @@ impl Surface {
     /// configure events, so they may be committed whenever.
     ///
     /// A single buffer may back any number of surfaces.
+    ///
+    /// # Damage
+    ///
+    /// The whole surface is damaged, in surface coordinates, on every commit.
+    /// This is deliberate. Damage is double-buffered state that a commit
+    /// applies, and a commit that damages nothing tells the compositor there is
+    /// nothing to repaint — so a surface that only ever swaps between buffers of
+    /// the same size, at the same position, can keep showing stale pixels. That
+    /// failure is quiet: the protocol is satisfied, nothing errors, and the
+    /// surface simply stops updating.
+    ///
+    /// The cost is that nothing here can repaint part of a surface, so a
+    /// consumer animating a small area of a large one redraws all of it. The
+    /// damage rectangle is not a parameter of this method for that reason; it
+    /// would have to grow into a separate request alongside
+    /// [`set_position`](Self::set_position), rather than be a parameter on this
+    /// one.
     pub fn commit(&self, buffer: &WlBuffer) {
         self.surface.attach(Some(buffer), 0, 0);
+        // Surface coordinates, so the viewport's scaling needs no accounting:
+        // `set_destination` below makes the surface exactly `width` x `height`.
+        self.surface.damage(0, 0, self.width, self.height);
         self.viewport.set_destination(self.width, self.height);
         self.surface.commit();
     }
@@ -189,6 +250,20 @@ impl Surface {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Whether a buffer may be committed to this surface yet.
+    ///
+    /// `false` only for a toplevel the compositor has not configured yet.
+    /// Attaching a buffer to one before its first configure is
+    /// `xdg_surface.error.unconfigured_buffer`, and a timer or a socket that
+    /// becomes ready early is the usual way to lose the race. Surfaces without
+    /// a toplevel role are always safe to commit.
+    pub fn is_configured(&self) -> bool {
+        match &self.role {
+            SurfaceRoleObject::Window { configured, .. } => *configured,
+            _ => true,
         }
     }
 
@@ -295,6 +370,9 @@ impl Dispatch<XdgToplevel, State> for SurfaceId {
         if let Some(surface) = state.surfaces.get_mut(*self) {
             match event {
                 XdgToplevelEvent::Configure { width, height, .. } => {
+                    if let SurfaceRoleObject::Window { configured, .. } = &mut surface.role {
+                        *configured = true;
+                    }
                     // Zero means the compositor has no opinion, so keep whatever
                     // size we already had.
                     if width != 0 {

@@ -1,8 +1,9 @@
 //! Snake, drawn with one subsurface per tile.
 //!
-//! Only the tiles that exist get a surface: the snake's body and the food. A
-//! surface's position is fixed at creation — there is no way to move one — so
-//! each step removes the tail's surface and creates one for the new head.
+//! Only the tiles that exist get a surface: the snake's body and the food.
+//! Surfaces are reused rather than recreated — a step moves the tile that was
+//! the tail to the front of the snake, so the number of surfaces tracks the
+//! snake's length for the whole game.
 //!
 //! The game runs on a timer. That is the whole reason this example is async:
 //! `Display::dispatch` sleeps inside the compositor's socket, so a blocking
@@ -11,10 +12,7 @@
 //! the socket and the pieces of the read protocol, and the event loop here is
 //! ordinary `tokio::select!` over that socket and a `tokio::time` interval.
 
-use std::{
-    os::fd::{AsRawFd, RawFd},
-    time::Duration,
-};
+use std::time::Duration;
 
 use anyhow::Result;
 use aufhebung::{
@@ -24,7 +22,7 @@ use aufhebung::{
     surface::{SurfaceId, SurfaceInfo, SurfaceRole},
 };
 use rand::Rng as _;
-use tokio::{io::unix::AsyncFd, time::MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use wayland_client::protocol::wl_buffer::WlBuffer;
 
 /// Size of the playing field, in cells.
@@ -35,17 +33,6 @@ const CELL: i32 = 24;
 
 /// How long the snake waits between steps.
 const STEP: Duration = Duration::from_millis(180);
-
-/// `AsyncFd` wants a handle it can poll, and it has to own it. The socket
-/// belongs to the `Display`, which outlives the loop, so a newtype over the raw
-/// fd is enough — nothing can close it out from under us while we hold one.
-struct Socket(RawFd);
-
-impl AsRawFd for Socket {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Pos(i32, i32);
@@ -142,15 +129,15 @@ impl Game {
                     parent: self.window,
                     x: pos.0 * self.cell,
                     y: pos.1 * self.cell,
+                    // Synchronized, so a tile's cached state is applied when the
+                    // window is committed — see `Game::place`, which does that.
+                    sync: true,
                 },
             })
             .expect("surface id space exhausted");
 
-        display.surface(id).unwrap().commit(self.ink(ink));
-
-        // A synchronized sub-surface stays invisible until the parent is
-        // committed again, so re-commit the window to bring this one on screen.
-        display.surface(self.window).unwrap().commit(&self.bg);
+        display.commit(id, self.ink(ink));
+        display.commit(self.window, &self.bg);
         id
     }
 
@@ -170,15 +157,13 @@ impl Game {
 
     /// Put a tile where it belongs, with the right colour, and repaint.
     ///
-    /// A synchronized sub-surface holds its state until the parent commits, so
-    /// every tile change ends in a parent commit. It also has to: a commit that
-    /// changes nothing visible can be dropped by the compositor, taking the
-    /// tile's damage with it.
+    /// The window is committed as well, which is what applies the tile's cached
+    /// position and damage while it is in synchronized mode.
     fn place(&self, display: &mut Display, tile: &Tile, ink: Ink) {
         let surface = display.surface(tile.id).unwrap();
         surface.set_position(tile.pos.0 * self.cell, tile.pos.1 * self.cell);
         surface.commit(self.ink(ink));
-        display.surface(self.window).unwrap().commit(&self.bg);
+        display.commit(self.window, &self.bg);
     }
 
     /// Lay out the opening position. Called once the real cell size is known.
@@ -200,7 +185,8 @@ impl Game {
     }
 
     fn step(&mut self, display: &mut Display) {
-        if self.over {
+        // Nothing to move until the board is laid out.
+        if self.over || self.body.is_empty() {
             return;
         }
 
@@ -289,7 +275,7 @@ async fn main() -> Result<()> {
 
     let mut game = Game::new(window, bg, inks);
 
-    let mut socket = AsyncFd::new(Socket(display.connection_fd().as_raw_fd()))?;
+    let mut socket = tokio::io::unix::AsyncFd::new(display.socket())?;
 
     // The creation requests are still sitting in the write buffer. Push them out
     // before waiting on anything: the compositor cannot configure a surface it
@@ -302,7 +288,7 @@ async fn main() -> Result<()> {
     stepper.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     println!(
-        "w/a/s/d or h/j/k/l to steer, q to quit — one step every {}ms",
+        "w/a/s/d, h/j/k/l, or the arrow keys to steer — q to quit, one step every {}ms",
         STEP.as_millis()
     );
 
@@ -335,10 +321,10 @@ async fn main() -> Result<()> {
             // ...or it is time for the snake to move.
             _ = stepper.tick() => {
                 // The first interval tick lands immediately, long before the
-                // compositor's configure arrives, and until it does there is no
-                // board and no snake to move. `cell` is the same "not laid out
-                // yet" sentinel the configure branch tests.
-                if game.cell != 0 && !game.over {
+                // compositor's configure arrives, and a commit before that
+                // configure is a protocol error. Ask the library rather than
+                // inferring it from a field of our own.
+                if display.is_configured(window) {
                     game.step(&mut display);
                 }
             }
@@ -355,13 +341,14 @@ async fn main() -> Result<()> {
                     id,
                     event: SurfaceEvent::Configure { width, height },
                 } => {
-                    // Lay out once. Surfaces cannot be repositioned, so a later
-                    // resize leaves the board where it was.
-                    if id == window && game.cell == 0 {
+                    // Lay out once, at the first configure. A later resize is
+                    // not handled: the tiles keep the cell size decided here, so
+                    // a smaller window would clip the board.
+                    if id == window && game.body.is_empty() {
                         game.cell = (width.min(height) / GRID).max(1);
                         // The window has now been configured, so this is the
                         // first commit that may legally carry a buffer.
-                        display.surface(window).unwrap().commit(&game.bg);
+                        display.commit(window, &game.bg);
                         game.start(&mut display);
                     }
                 }
@@ -370,16 +357,10 @@ async fn main() -> Result<()> {
                         if !pressed {
                             continue;
                         }
-                        // The first keysym is the preferred one, and for a plain
-                        // letter that is the character it types.
-                        //
-                        // Note: `char()` has no mapping for cursor keys, so the
-                        // arrow keys cannot be detected this way — only letters
-                        // work.
-                        let Some(c) = display
-                            .translate_key(seat, key)
-                            .and_then(|keysyms| keysyms.first()?.char())
-                        else {
+                        // The preferred keysym, resolved to a character. This also
+                        // covers the cursor keys, which have no character of
+                        // their own and so need the library's fallback table.
+                        let Some(c) = display.translate_char(seat, key) else {
                             continue;
                         };
 
@@ -388,6 +369,10 @@ async fn main() -> Result<()> {
                             's' | 'j' => game.turn(Pos(0, 1)),
                             'a' | 'h' => game.turn(Pos(-1, 0)),
                             'd' | 'l' => game.turn(Pos(1, 0)),
+                            '\u{2190}' => game.turn(Pos(-1, 0)),
+                            '\u{2191}' => game.turn(Pos(0, -1)),
+                            '\u{2192}' => game.turn(Pos(1, 0)),
+                            '\u{2193}' => game.turn(Pos(0, 1)),
                             'q' => return Ok(()),
                             _ => continue,
                         }
