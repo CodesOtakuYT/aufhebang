@@ -8,8 +8,10 @@
 //! The board is a torus. The snake wraps off one edge and arrives on the other,
 //! so `Pos::step` is a `rem_euclid` rather than a bounds check, and the edges
 //! are not a way to lose. Running into itself is the only thing that is, and it
-//! ends the game: the board is held still for a moment, then every tile surface
-//! is removed and a new game is laid out in the same window.
+//! ends the game: the board is held still while the title flashes, then the
+//! title asks for another round and nothing at all happens until a key says yes.
+//! Then every tile surface is removed and a new game is laid out in the same
+//! window.
 //!
 //! The game runs on a timer. That is the whole reason this example is async:
 //! `Display::dispatch` sleeps inside the compositor's socket, so a blocking
@@ -41,15 +43,33 @@ const CELL: i32 = 24;
 /// How long the snake waits between steps.
 const STEP: Duration = Duration::from_millis(180);
 
-/// How long the final board is held still, and the title flashed, before the
-/// next game starts.
-const PAUSE: Duration = Duration::from_millis(3_000);
-
 /// One half of a title flash: the title alternates every `FLASH`.
 const FLASH: Duration = Duration::from_millis(450);
 
+/// How long the title flashes after a crash before it starts asking. A whole
+/// number of halves, so the flash ends on a blank rather than mid-blink.
+const FLASHES: Duration = Duration::from_millis(2_700);
+
 /// The window title while the game is being played, with the score appended.
 const TITLE: &str = "snake";
+
+/// The title while it is flashing after a crash.
+const OVER: &str = "GAME OVER!";
+
+/// The title once the flash is over, which asks for the next game.
+const RETRY: &str = "GAME OVER! — press any key to retry";
+
+/// What the game is doing between steps.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// Moving.
+    Playing,
+    /// Crashed at this instant. The board is held still and the title flashes
+    /// for [`FLASHES`].
+    Flashing(Instant),
+    /// The flash is over. Nothing happens until a key asks for another game.
+    Waiting,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Pos(i32, i32);
@@ -111,9 +131,7 @@ struct Game {
     wanted: Pos,
     food: Option<Tile>,
     score: usize,
-    /// When the snake ran into itself, if it has. The next game starts a
-    /// [`PAUSE`] later, and the title flashes in between.
-    dead: Option<Instant>,
+    phase: Phase,
     /// The last blink half written to the title, so a tick landing in the same
     /// half does not repeat the request.
     flash: Option<u128>,
@@ -132,7 +150,7 @@ impl Game {
             wanted: Pos(0, 1),
             food: None,
             score: 0,
-            dead: None,
+            phase: Phase::Playing,
             flash: None,
             rng: rand::rng(),
         }
@@ -197,7 +215,7 @@ impl Game {
     /// known, and again for every replay.
     fn start(&mut self, display: &mut Display) {
         self.score = 0;
-        self.dead = None;
+        self.phase = Phase::Playing;
         self.flash = None;
 
         let head = Pos(GRID / 2, GRID / 2);
@@ -222,6 +240,20 @@ impl Game {
     /// without watching the board.
     fn set_title(&mut self, display: &mut Display) {
         display.set_title(self.window, &format!("{TITLE} — score {}", self.score));
+    }
+
+    /// Whether the flash is over and the game is waiting to be asked for
+    /// another round.
+    fn awaiting_retry(&self) -> bool {
+        matches!(self.phase, Phase::Waiting)
+    }
+
+    /// Start another game, if one was being offered. A no-op at any other time,
+    /// so the key handler can pass every keypress straight through.
+    fn retry(&mut self, display: &mut Display) {
+        if self.awaiting_retry() {
+            self.restart(display);
+        }
     }
 
     /// Clear the board and start again in the same window.
@@ -257,23 +289,42 @@ impl Game {
         // like a game over than a number does. Driven from elapsed time rather
         // than a toggle, so the rate does not drift with `STEP` and a late tick
         // still lands on the right half.
-        if let Some(died) = self.dead {
-            // Which half of the blink this is. A half lasts `FLASH` but a tick
-            // lands every `STEP`, so the same half is usually seen two or three
-            // times over; remembering the last one keeps the request from being
-            // repeated unchanged. Lit on the even halves, so the notice is up on
-            // the first tick after the crash rather than a beat after it.
-            let half = died.elapsed().as_millis() / FLASH.as_millis();
-            if self.flash != Some(half) {
-                self.flash = Some(half);
-                let on = half.is_multiple_of(2);
-                display.set_title(self.window, if on { "GAME OVER!" } else { "" });
-            }
-            if Instant::now() < died + PAUSE {
+        // Between games nothing moves, so that the final board is still there to
+        // be looked at while the title makes its point.
+        match self.phase {
+            // Hold the board still and flash the title, so the state is obvious
+            // even if the board is not the thing being looked at. It blinks
+            // against an empty title rather than against the score, which reads
+            // more like a game over than a number does. Driven from elapsed time
+            // rather than a toggle, so the rate does not drift with `STEP` and a
+            // late tick still lands on the right half.
+            Phase::Flashing(died) => {
+                if died.elapsed() < FLASHES {
+                    // Which half of the blink this is. A half lasts `FLASH` but a
+                    // tick lands every `STEP`, so the same half is usually seen
+                    // two or three times over; remembering the last one keeps the
+                    // request from being repeated unchanged. Lit on the even
+                    // halves, so the notice is up on the first tick after the
+                    // crash rather than a beat after it.
+                    let half = died.elapsed().as_millis() / FLASH.as_millis();
+                    if self.flash != Some(half) {
+                        self.flash = Some(half);
+                        let on = half.is_multiple_of(2);
+                        display.set_title(self.window, if on { OVER } else { "" });
+                    }
+                    return;
+                }
+                // The flash has said its piece, so stop shouting and ask. Written
+                // on this one tick, where the phase changes, rather than on every
+                // tick of the wait that follows.
+                self.phase = Phase::Waiting;
+                display.set_title(self.window, RETRY);
                 return;
             }
-            self.restart(display);
-            return;
+            // Waiting to be asked. `Game::retry` is what moves us out, and it is
+            // called from the key handler rather than from here.
+            Phase::Waiting => return,
+            Phase::Playing => {}
         }
 
         // Doubling back into your own neck is not a legal move.
@@ -285,7 +336,8 @@ impl Game {
         // yourself is the only thing that is.
         let next = self.body[0].pos.step(self.dir);
         if self.body.iter().any(|t| t.pos == next) {
-            self.dead = Some(Instant::now());
+            self.phase = Phase::Flashing(Instant::now());
+            self.flash = None;
             // Leave a mark where it happened, so the board shows the mistake
             // through the pause. It rides on `body` so that the restart clears
             // it along with everything else.
@@ -453,6 +505,11 @@ async fn main() -> Result<()> {
                         };
 
                         match c.to_ascii_lowercase() {
+                            'q' => return Ok(()),
+                            // Between games, any other key takes the offer. Ahead
+                            // of the steering keys, since those would otherwise be
+                            // swallowed as an attempt to play on.
+                            _ if game.awaiting_retry() => game.retry(&mut display),
                             'w' | 'k' => game.turn(Pos(0, -1)),
                             's' | 'j' => game.turn(Pos(0, 1)),
                             'a' | 'h' => game.turn(Pos(-1, 0)),
@@ -461,7 +518,6 @@ async fn main() -> Result<()> {
                             '\u{2191}' => game.turn(Pos(0, -1)),
                             '\u{2192}' => game.turn(Pos(1, 0)),
                             '\u{2193}' => game.turn(Pos(0, 1)),
-                            'q' => return Ok(()),
                             _ => continue,
                         }
                     }

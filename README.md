@@ -16,7 +16,8 @@ metadata, keyboard state — and hands you events. Buffers and the event loop st
 cargo run --features tokio --example snake
 ```
 
-`w/a/s/d` or `h/j/k/l` to steer, `q` to quit.
+`w/a/s/d`, `h/j/k/l` or the arrow keys to steer, `q` to quit. After a crash the title flashes, then
+asks for another round — any key but `q` plays again.
 
 A game that moves by itself, on a `tokio::select!` over the Wayland socket and a timer — the
 library has no runtime dependency, the example does. Every tile is its own sub-surface, and
