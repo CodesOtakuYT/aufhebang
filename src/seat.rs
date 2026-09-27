@@ -23,11 +23,16 @@ pub struct Keyboard {
     mods: ModifierMask,
 }
 
-pub struct Seat {
-    keyboard: Keyboard,
+new_key_type! {
+    pub struct SeatId;
 }
 
-impl Dispatch<WlSeat, State> for GlobalData {
+pub struct Seat {
+    pub seat: WlSeat,
+    pub keyboard: Option<Keyboard>,
+}
+
+impl Dispatch<WlSeat, State> for SeatId {
     fn event(
         &self,
         state: &mut State,
@@ -36,21 +41,20 @@ impl Dispatch<WlSeat, State> for GlobalData {
         conn: &Connection,
         qh: &QueueHandle<State>,
     ) {
-        let keyboard = proxy.get_keyboard(qh, GlobalData);
-        state.seat = Some(Seat {
-            keyboard: Keyboard {
-                keyboard,
-                keymap: None,
-                lookup_table: None,
-                focused_surface: None,
-                group: Default::default(),
-                mods: Default::default(),
-            },
+        let keyboard = proxy.get_keyboard(qh, *self);
+        let seat = state.seat_mut(*self);
+        seat.keyboard = Some(Keyboard {
+            keyboard,
+            keymap: Default::default(),
+            lookup_table: Default::default(),
+            focused_surface: Default::default(),
+            group: Default::default(),
+            mods: Default::default(),
         });
     }
 }
 
-impl Dispatch<WlKeyboard, State> for GlobalData {
+impl Dispatch<WlKeyboard, State> for SeatId {
     fn event(
         &self,
         state: &mut State,
@@ -69,7 +73,7 @@ impl Dispatch<WlKeyboard, State> for GlobalData {
                 }
                 .unwrap();
                 let lookup_table = keymap.to_builder().build_lookup_table();
-                let keyboard = &mut state.seat.as_mut().unwrap().keyboard;
+                let keyboard = state.keyboard_mut(*self);
                 keyboard.keymap = Some(keymap);
                 keyboard.lookup_table = Some(lookup_table);
             }
@@ -79,11 +83,11 @@ impl Dispatch<WlKeyboard, State> for GlobalData {
                 keys,
             } => {
                 let surface_id = surface.data::<SurfaceId>().unwrap();
-                let keyboard = &mut state.seat.as_mut().unwrap().keyboard;
+                let keyboard = state.keyboard_mut(*self);
                 keyboard.focused_surface = Some(*surface_id);
             }
             wayland_client::protocol::wl_keyboard::Event::Leave { serial, surface } => {
-                let keyboard = &mut state.seat.as_mut().unwrap().keyboard;
+                let keyboard = state.keyboard_mut(*self);
                 keyboard.focused_surface = None;
             }
             wayland_client::protocol::wl_keyboard::Event::Key {
@@ -92,7 +96,7 @@ impl Dispatch<WlKeyboard, State> for GlobalData {
                 key,
                 state: key_state,
             } => {
-                let keyboard = &mut state.seat.as_mut().unwrap().keyboard;
+                let keyboard = state.keyboard_mut(*self);
                 for keysym in keyboard.lookup_table.as_ref().unwrap().lookup(
                     keyboard.group,
                     keyboard.mods,
@@ -108,7 +112,7 @@ impl Dispatch<WlKeyboard, State> for GlobalData {
                 mods_locked,
                 group,
             } => {
-                let keyboard = &mut state.seat.as_mut().unwrap().keyboard;
+                let keyboard = state.keyboard_mut(*self);
                 keyboard.group = GroupIndex(group);
                 keyboard.mods = ModifierMask(mods_depressed | mods_latched | mods_locked);
             }

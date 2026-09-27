@@ -13,7 +13,6 @@ pub struct Display {
     conn: Connection,
     event_queue: EventQueue<State>,
     qh: QueueHandle<State>,
-    globals: Globals,
     state: State,
 }
 
@@ -31,18 +30,26 @@ impl Display {
         let event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
         let globals = Globals::new(&conn, &qh)?;
-        let state = State::default();
+        let state = State {
+            globals,
+            surfaces: Default::default(),
+            xkb_ctx: Default::default(),
+        };
         Ok(Self {
             conn,
             event_queue,
             qh,
             state,
-            globals,
         })
     }
 
     pub fn add_surface(&mut self, info: SurfaceInfo) -> Result<SurfaceId, SurfaceError> {
-        Surface::new(&self.globals, &mut self.state.surfaces, &self.qh, info)
+        Surface::new(
+            &self.state.globals,
+            &mut self.state.surfaces,
+            &self.qh,
+            info,
+        )
     }
 
     pub fn remove_surface(&mut self, id: SurfaceId) -> Option<Surface> {
@@ -63,7 +70,8 @@ impl Display {
     }
 
     pub fn add_color(&self, r: u32, g: u32, b: u32, a: u32) -> WlBuffer {
-        self.globals
+        self.state
+            .globals
             .spbm
             .create_u32_rgba_buffer(r, g, b, a, &self.qh, NoopIgnore)
     }

@@ -1,5 +1,6 @@
+use slotmap::SlotMap;
 use wayland_client::{
-    Connection, Dispatch, NoopIgnore, QueueHandle,
+    Connection, Dispatch, NoopIgnore, Proxy, QueueHandle,
     globals::{BindError, GlobalError, GlobalList, GlobalListHandler},
     protocol::{
         wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat,
@@ -17,7 +18,10 @@ use wayland_protocols::{
     },
 };
 
-use crate::state::State;
+use crate::{
+    seat::{Seat, SeatId},
+    state::State,
+};
 
 pub struct Globals {
     pub compositor: WlCompositor,
@@ -29,7 +33,7 @@ pub struct Globals {
     pub wm_base: XdgWmBase,
     pub deco_mgr: ZxdgDecorationManagerV1,
 
-    pub seat: WlSeat,
+    pub seats: SlotMap<SeatId, Option<Seat>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -61,7 +65,16 @@ impl Globals {
         let deco_mgr =
             global_list.bind_singleton::<ZxdgDecorationManagerV1, _, _>(1..=1, qh, NoopIgnore)?;
 
-        let seat = global_list.bind_singleton::<WlSeat, _, _>(0..=1, qh, GlobalData)?;
+        let mut seats = SlotMap::<SeatId, Option<Seat>>::default();
+
+        for seat in global_list.bind_all::<WlSeat, _, _>(1..=1, qh, |id| seats.insert(None))? {
+            let id = seat.data::<SeatId>().unwrap();
+            let slot = seats.get_mut(*id).unwrap();
+            *slot = Some(Seat {
+                seat,
+                keyboard: None,
+            });
+        }
 
         Ok(Self {
             compositor,
@@ -70,7 +83,7 @@ impl Globals {
             subcompositor,
             wm_base,
             deco_mgr,
-            seat,
+            seats,
         })
     }
 }
