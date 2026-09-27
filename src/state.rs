@@ -73,30 +73,35 @@ pub enum Event {
     SeatEvent { id: SeatId, event: SeatEvent },
 }
 
-pub struct State {
-    pub globals: Globals,
-    pub surfaces: SlotMap<SurfaceId, Surface>,
-    pub xkb_ctx: kbvm::xkb::Context,
-    pub events: VecDeque<Event>,
+/// Everything the connection dispatches into.
+///
+/// Owned by [`Display`](crate::display::Display), which is the only way to
+/// reach it, and named as the state parameter of every `Dispatch` impl in the
+/// crate. The event queue drives it; nothing outside sees it.
+pub(crate) struct State {
+    pub(crate) globals: Globals,
+    pub(crate) surfaces: SlotMap<SurfaceId, Surface>,
+    pub(crate) xkb_ctx: kbvm::xkb::Context,
+    pub(crate) events: VecDeque<Event>,
 }
 
 impl State {
     /// `None` if the seat is gone, or if the compositor has not told us about it
     /// yet.
-    pub fn seat(&self, seat: SeatId) -> Option<&Seat> {
+    pub(crate) fn seat(&self, seat: SeatId) -> Option<&Seat> {
         self.globals.seats.get(seat)?.as_ref()
     }
 
-    pub fn seat_mut(&mut self, seat: SeatId) -> Option<&mut Seat> {
+    pub(crate) fn seat_mut(&mut self, seat: SeatId) -> Option<&mut Seat> {
         self.globals.seats.get_mut(seat)?.as_mut()
     }
 
     /// `None` if the seat is gone or exposes no keyboard.
-    pub fn keyboard(&self, seat: SeatId) -> Option<&Keyboard> {
+    pub(crate) fn keyboard(&self, seat: SeatId) -> Option<&Keyboard> {
         self.seat(seat)?.keyboard.as_ref()
     }
 
-    pub fn keyboard_mut(&mut self, seat: SeatId) -> Option<&mut Keyboard> {
+    pub(crate) fn keyboard_mut(&mut self, seat: SeatId) -> Option<&mut Keyboard> {
         self.seat_mut(seat)?.keyboard.as_mut()
     }
 }

@@ -43,7 +43,7 @@ use wayland_client::{
 
 use crate::{
     color::Color,
-    globals::{Globals, GlobalsError},
+    globals::Globals,
     seat::SeatId,
     state::{Event, State},
     surface::{Surface, SurfaceId, SurfaceInfo},
@@ -92,6 +92,10 @@ pub struct Display {
     qh: QueueHandle<State>,
     state: State,
 }
+
+/// Re-exported so it stays nameable now that the `globals` module is private:
+/// this is the type of [`DisplayError::GlobalsError`].
+pub use crate::globals::GlobalsError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum DisplayError {

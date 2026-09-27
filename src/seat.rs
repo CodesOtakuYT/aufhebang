@@ -26,7 +26,7 @@ use crate::{
     surface::SurfaceId,
 };
 
-pub struct Keyboard {
+pub(crate) struct Keyboard {
     keymap: Option<Keymap>,
     pub(crate) lookup_table: Option<LookupTable>,
     focused_surface: Option<SurfaceId>,
@@ -38,9 +38,18 @@ new_key_type! {
     pub struct SeatId;
 }
 
-pub struct Seat {
-    pub seat: WlSeat,
-    pub keyboard: Option<Keyboard>,
+/// A seat and, once the compositor has advertised one, its keyboard.
+///
+/// Reachable only through the [`SeatId`] that a
+/// [`SeatEvent`](crate::state::SeatEvent) carries, and the ids themselves only
+/// from those events.
+pub(crate) struct Seat {
+    // Never read, but held so the proxy outlives the seat's events — the same
+    // reasoning as the keyboard proxy below. `pub` used to hide this from
+    // dead_code.
+    #[allow(dead_code)]
+    pub(crate) seat: WlSeat,
+    pub(crate) keyboard: Option<Keyboard>,
 }
 
 impl Dispatch<WlSeat, State> for SeatId {

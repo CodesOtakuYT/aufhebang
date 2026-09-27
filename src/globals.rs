@@ -20,17 +20,21 @@ use crate::{
     state::State,
 };
 
-pub struct Globals {
-    pub compositor: WlCompositor,
-    pub viewporter: WpViewporter,
-    pub spbm: WpSinglePixelBufferManagerV1,
+/// The bound singletons, and the seats the compositor advertised.
+///
+/// Reachable only through [`Display`](crate::display::Display), which owns the
+/// [`State`](crate::state::State) holding it.
+pub(crate) struct Globals {
+    pub(crate) compositor: WlCompositor,
+    pub(crate) viewporter: WpViewporter,
+    pub(crate) spbm: WpSinglePixelBufferManagerV1,
 
-    pub subcompositor: WlSubcompositor,
+    pub(crate) subcompositor: WlSubcompositor,
 
-    pub wm_base: XdgWmBase,
-    pub deco_mgr: ZxdgDecorationManagerV1,
+    pub(crate) wm_base: XdgWmBase,
+    pub(crate) deco_mgr: ZxdgDecorationManagerV1,
 
-    pub seats: SlotMap<SeatId, Option<Seat>>,
+    pub(crate) seats: SlotMap<SeatId, Option<Seat>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -41,10 +45,10 @@ pub enum GlobalsError {
     BindError(#[from] BindError),
 }
 
-pub struct GlobalData;
+pub(crate) struct GlobalData;
 
 impl Globals {
-    pub fn new(conn: &Connection, qh: &QueueHandle<State>) -> Result<Self, GlobalsError> {
+    pub(crate) fn new(conn: &Connection, qh: &QueueHandle<State>) -> Result<Self, GlobalsError> {
         let global_list = GlobalList::init(conn, qh)?;
 
         let compositor = global_list.bind_singleton::<WlCompositor, _, _>(1..=1, qh, NoopIgnore)?;

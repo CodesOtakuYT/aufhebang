@@ -7,13 +7,17 @@ use rustix::mm::{MapFlags, ProtFlags};
 /// The file descriptor is only borrowed for the duration of [`Mmap::new`]: the
 /// caller is free to close it as soon as the mapping exists, since the mapping
 /// keeps its own reference to the underlying file.
-pub struct Mmap {
+/// A read-only private mapping of a file.
+///
+/// Only used to read the keymap the compositor sends on a `wl_keyboard.keymap`
+/// fd, and only while that fd is open, so the mapping is not worth exposing.
+pub(crate) struct Mmap {
     size: usize,
     ptr: *mut c_void,
 }
 
 impl Mmap {
-    pub fn new(fd: BorrowedFd<'_>, size: usize) -> io::Result<Self> {
+    pub(crate) fn new(fd: BorrowedFd<'_>, size: usize) -> io::Result<Self> {
         let ptr = unsafe {
             rustix::mm::mmap(
                 std::ptr::null_mut(),
@@ -27,7 +31,7 @@ impl Mmap {
         Ok(Self { size, ptr })
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.size) }
     }
 }
