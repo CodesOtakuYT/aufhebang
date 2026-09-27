@@ -17,3 +17,8 @@ wayland-protocols = { git = "https://github.com/Smithay/wayland-rs.git", rev = "
 
 [dev-dependencies]
 anyhow = "1.0.104"
+rand = "0.9.2"
+# Examples only. The library exposes hooks for an event loop but depends on no
+# runtime, so this stays out of [dependencies] on purpose.
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+wayland-client = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53" }

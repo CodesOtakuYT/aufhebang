@@ -1,141 +1,149 @@
 # aufhebung
 
-A windowing library for native Wayland applications. It wraps the parts of xdg-shell that
-every app has to get right — the configure handshake, surface roles, toplevel metadata, seat
-and keyboard state — and hands you events. You keep your own buffers and your own event
-loop, and you draw.
+A windowing library for native Wayland applications.
 
-> **Status: early.** The API is unstable and will change. Pointer input, frame callbacks,
-> clipboard, text input, and `wl_output` are not implemented yet. See [Known gaps](#known-gaps).
+It handles the xdg-shell bookkeeping — the configure handshake, surface roles, toplevel
+metadata, keyboard state — and hands you events. Buffers and the event loop stay yours.
 
-## Model
-
-The split is deliberate: **the library owns the protocol bookkeeping, the app owns content.**
-
-- The library creates surfaces, assigns roles, tracks configure/resize state, and acks every
-  `xdg_surface.configure` exactly once.
-- Your app supplies buffers and decides when to commit them.
-
-So the loop is:
-
-1. `Display::add_surface` — creates the surface and commits it with **no** buffer, which is
-   what makes the compositor send the first configure.
-2. The compositor configures. The library acks and queues a `SurfaceEvent::Configure`.
-3. `Display::events` yields it; you call `Surface::commit(&buffer)`, which attaches, scales
-   to the current size via `wp_viewporter`, and commits.
-
-Committing a toplevel before its first configure is a protocol error. Subsurfaces get no
-configure events, so they may be committed whenever you like.
-
-`Display::add_color` hands out 1×1 `wl_buffer`s from
-`wp_single_pixel_buffer_manager_v1`, which `Surface::commit` scales to fill the surface. It
-exists so the example runs without a buffer pipeline. Real drawing wants your own shm or
-dma-buf buffers — the library never inspects a buffer it is given, and the same buffer may
-back any number of surfaces.
-
-`Display::dispatch` blocks until something arrives. Driving it from a thread, a `poll`, or
-an async runtime is your call; the library runs no loop of its own and spawns no threads.
+> **Early.** The API is unstable. No pointer input, frame callbacks, text input, clipboard, or
+> `wl_output` yet.
 
 ## Example
 
+<img src="assets/snake.png" width="300" alt="The snake example running: a near-black window holding a grid of tiles, a green snake with a paler green head, and a single red food tile" />
+
+```sh
+cargo run --example snake
+```
+
+`w/a/s/d` or `h/j/k/l` to steer, `q` to quit.
+
+A game that moves by itself, on a `tokio::select!` over the Wayland socket and a timer — the
+library has no runtime dependency, the example does. Every tile is its own sub-surface, and
+each step moves the tail surface to the front instead of destroying and recreating one, so
+the number of surfaces tracks the snake's length for the whole game. Every colour is a 1×1
+`wl_buffer` that the compositor scales to fill.
+
+## Usage
+
 ```rust
 use aufhebung::{
+    color::Color,
     display::Display,
     state::{Event, SurfaceEvent},
     surface::{SurfaceInfo, SurfaceRole},
 };
 
-let mut display = Display::new()?;
-let white = display.add_color(u32::MAX, u32::MAX, u32::MAX, u32::MAX);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut display = Display::new()?;
+    let white = display.add_color(Color::WHITE);
 
-let id = display
-    .add_surface(SurfaceInfo {
-        width: 800,
-        height: 800,
-        role: SurfaceRole::Window { title: "hello".into() },
-    })
-    .expect("subsurface parent is not live");
+    let id = display
+        .add_surface(SurfaceInfo {
+            width: 800,
+            height: 800,
+            role: SurfaceRole::Window { title: "hello".into() },
+        })
+        .expect("no surface id available");
 
-loop {
-    display.dispatch()?;
-    for event in display.events() {
-        match event {
-            Event::SurfaceEvent { id, event: SurfaceEvent::Configure { width, height } } => {
-                println!("{id:?} is now {width}x{height}");
+    loop {
+        display.dispatch()?;
+        for event in display.events() {
+            if let Event::SurfaceEvent {
+                event: SurfaceEvent::Configure { width, height },
+                ..
+            } = event
+            {
+                println!("{id:?} resized to {width}x{height}");
                 display.surface(id).unwrap().commit(&white);
             }
-            Event::SeatEvent { .. } => {}
         }
     }
 }
 ```
 
-See `examples/demo.rs` for subsurfaces, key translation, and close handling.
+Commit a toplevel's first buffer in response to its configure event, not before — the
+compositor has to say how big the window is first.
 
-## Windows and decorations
+## API
 
-`SurfaceRole::Window` takes a title, and `Surface::title` reads it back. The library asks
-for `zxdg_toplevel_decoration_v1` in `server_side` mode, meaning the compositor draws the
-title bar and the app's buffer covers only the client area. There is no way to select
-client-side decoration, so an app that draws its own chrome cannot use it as-is.
+- **`Display`** — connect, and drive the connection either blocking (`dispatch`) or from any
+  readiness API (`connection_fd`, `prepare_read`, `dispatch_pending`, `flush`).
+- **`SurfaceRole`** — `Window { title }` for a toplevel, `Subsurface { parent, x, y }` for a
+  positioned sub-surface, or `None` for a bare `wl_surface`.
+- **`Surface`** — `commit` attaches a buffer and scales it to the surface; `set_position`
+  moves a sub-surface.
+- **`Color`** — 8 bits per channel. `add_color` turns one into a `wl_buffer` that fills a
+  surface, which is enough to draw something before you have a buffer pipeline.
+- **`translate_key`** — the compositor's keymap, resolved to keysyms.
 
-## Keyboard
+No threads, no timers, no runtime dependency. Tokio is a dev-dependency for the example.
 
-`Display::translate_key` runs the compositor's keymap through [kbvm] and returns the keysyms
-for a key, most preferred first. It is `None` until the seat has sent its keymap, so a
-keypress that races startup is skipped rather than panicking.
+## Why not winit?
 
-`SeatEvent::Key` carries `pressed`, so presses and releases are distinguishable. The
-compositor does not send auto-repeat key events, so repeating is your job: it arrives as
-`SeatEvent::RepeatInfo { rate, delay }`, where `rate` is keys per second (`0` disables
-repeat) and `delay` is the milliseconds before the first one. Start a timer on a press, stop
-it on the matching release, and retune it if `RepeatInfo` changes.
+For most projects, [winit] is the right tool and you should use it. It is mature, it is
+cross-platform, and it has pointer input, text input, clipboard, and monitor enumeration —
+none of which exist here yet. This crate is not trying to beat it.
 
-Modifiers and layout group come from `wl_keyboard.modifiers`. kbvm's own state machine is
-not used, so a group switch that a keymap performs internally is not tracked.
+[winit]: https://github.com/rust-windowing/winit
+[#1199]: https://github.com/rust-windowing/winit/issues/1199
+[#3506]: https://github.com/rust-windowing/winit/issues/3506
+
+| | winit 0.30 | aufhebung 0.1 |
+|---|---|---|
+| Platforms | Windows, macOS, Linux (X11 + Wayland), Android, iOS, web | Wayland only |
+| Pointer, text input, clipboard, monitors | yes | none of these |
+| Sub-surfaces | no, [open issue][#3506] | yes |
+| Maturity | widely depended on | one example |
+| System libraries | `libwayland-dev` and `pkg-config` to build, `libxkbcommon` at runtime | [none](#system-libraries) |
+| Event loop | blocking `run`, normally the main thread, no native async | you own the socket and write the `select!` |
+| Abstraction level | `Window`, `ApplicationHandler` | `wl_surface`, roles, configs, buffers |
+
+Four reasons to reach for this instead:
+
+- **You are Wayland-only** and want no X11, Windows, or macOS code in the tree.
+- **You need sub-surfaces.** winit is toplevel-only, so the usual workaround is to run
+  `wayland-client` alongside it and manage the second connection yourself. The snake example
+  is built entirely out of sub-surfaces.
+- **You want async to be the default rather than a port.** winit has no native async story —
+  it is a blocking loop you call `run` on, usually pinned to the main thread, and the
+  conventional fix is to run tokio on other threads and ferry events over a channel. That
+  integration is still an [open question upstream][#1199]. This crate has no loop to run: you
+  hold the socket, so the event loop is one branch of a `select!` and the runtime is optional.
+- **You would rather not ship system libraries.** No `libwayland` or `libxkbcommon` to install
+  on the target, and no C toolchain to cross-compile with. See
+  [System libraries](#system-libraries).
+
+If none of those four apply, winit is the better tool.
+
+## System libraries
+
+No shared-library dependencies. No `libwayland`, no `libxkbcommon`, no `libX11`.
+
+- **`wayland-client`'s `system` and `dlopen` features are off**, so it uses the pure-Rust
+  rustix backend and talks to the compositor socket directly.
+- **Keymaps go through [kbvm]**, a Rust implementation of xkbcommon, rather than libxkbcommon.
+- **No C compiler runs.** Protocol code is generated at compile time by the `wayland-scanner`
+  proc-macro. The one `cc` build-dependency in the graph belongs to `wayland-backend`'s
+  logging shim, behind a feature this crate does not enable.
+
+Two things are still expected of the system, neither a library: the `xkeyboard-config` data
+files that kbvm compiles keymaps against, which every desktop ships and which its build script
+falls back to `/usr/share/X11/xkb` for when `pkg-config` cannot locate them; and a Wayland
+compositor to connect to.
 
 [kbvm]: https://crates.io/crates/kbvm
 
-## Dependencies
+## Limitations
 
-`wayland-client` and `wayland-protocols` are pinned to a git revision rather than a release,
-because the staging and unstable protocols this crate needs are not in a published crate
-yet. Expect churn there.
+- No pointer input, frame callbacks, text input, clipboard, or `wl_output`.
+- Sub-surfaces are always synchronized, so changing one needs a parent commit.
+- Decoration is server-side only, and the mode the compositor settles on is not read back.
+- `translate_key` returns keysyms. Converting one to a character goes through
+  `kbvm::Keysym::char()`, which has no mapping for the cursor keys — arrow keys need a direct
+  `kbvm` dependency.
 
-## Building
+## Requirements
 
-```sh
-cargo build
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-
-`rust-toolchain.toml` pins nightly, which is what this was last built with — but nothing in
-the crate actually requires it. Edition 2024 needs stable 1.85 or newer, and the source uses
-no `#![feature]` attributes, so switching the channel to `stable` should work.
-
-```sh
-cargo run --example demo
-```
-
-## Known gaps
-
-Ordered roughly by how much they block a real application.
-
-- **No pointer input.** No `wl_pointer`, no `wl_seat.pointer` capability handling. A
-  windowing library without the mouse is not yet usable as one.
-- **No frame callbacks.** There is no way to learn when the compositor is done with the
-  previous frame, so redraws cannot be paced to vsync.
-- **No text input or clipboard.** No `zwp_text_input_v*`, no `wl_data_device`, so no IME and
-  no copy/paste.
-- **No `wl_output` binding.** Monitors are never enumerated, so multi-monitor placement has
-  nothing to work from.
-- **No popups, cursors, or DnD protocols.** `SurfaceRole` covers toplevel, subsurface, and
-  unassigned only — no `xdg_popup`, so no menus, tooltips, or context menus.
-- **No `set_app_id`.** `xdg_toplevel.app_id` is never sent, which some compositors and
-  desktop-environment rules need.
-- **No surface removal cascade.** Removing a surface does not remove its subsurfaces.
-- **No runtime global handling.** `GlobalListHandler` has no `runtime_add_global`
-  implementation, so a global appearing after startup is ignored.
-- **Unvalidated keymap.** `wl_keyboard.keymap.format` is not checked, and a keymap that
-  fails to parse panics rather than surfacing an error.
+A Wayland compositor, and `wayland-client`. `rust-toolchain.toml` pins nightly; nothing in the
+crate requires it.

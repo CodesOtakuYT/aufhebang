@@ -170,6 +170,28 @@ impl Surface {
         self.height
     }
 
+    /// Move a sub-surface, in the parent surface's coordinate system.
+    ///
+    /// The position is double-buffered, so it does not take effect until a
+    /// commit cycle completes. Call this before [`commit`](Self::commit) on the
+    /// sub-surface, and — while it is in the default synchronized mode — commit
+    /// the parent as well, since that is what applies the cached state.
+    ///
+    /// Negative coordinates are allowed, and a sub-surface is *not* clipped to
+    /// the parent's area, so this can place one outside it.
+    ///
+    /// Returns `false`, having changed nothing, for any role other than a
+    /// sub-surface.
+    pub fn set_position(&self, x: i32, y: i32) -> bool {
+        match &self.role {
+            SurfaceRoleObject::Subsurface { subsurface } => {
+                subsurface.set_position(x, y);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The title of a toplevel, or `None` for any other role.
     pub fn title(&self) -> Option<&str> {
         match &self.role {
