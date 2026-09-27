@@ -100,6 +100,36 @@ impl Display {
         )
     }
 
+    /// Remove a surface, sending the `destroy` requests for its protocol
+    /// objects: the role object, its viewport, and the `wl_surface` itself.
+    ///
+    /// The removed surface is returned rather than dropped here, so that its
+    /// details can still be read — `title`, say. The destroy requests are sent
+    /// when it is dropped, so bind it to `_` or let the statement end:
+    ///
+    /// ```
+    /// # use aufhebung::{
+    /// #     display::Display,
+    /// #     surface::{SurfaceInfo, SurfaceRole},
+    /// # };
+    /// # fn demo(display: &mut Display) {
+    /// let id = display
+    ///     .add_surface(SurfaceInfo {
+    ///         width: 320,
+    ///         height: 240,
+    ///         role: SurfaceRole::None,
+    ///     })
+    ///     .unwrap();
+    /// display.remove_surface(id);
+    /// # }
+    /// ```
+    ///
+    /// Returns `None` for an id that is not live. A `SurfaceId` is never
+    /// reused, so a stale one stays `None` rather than naming a later surface.
+    ///
+    /// Removing a parent does not remove its children, and does not stop the
+    /// compositor from drawing the children that are still live. Remove the
+    /// children first, or a sub-surface outlives the window it was placed in.
     pub fn remove_surface(&mut self, id: SurfaceId) -> Option<Surface> {
         self.state.surfaces.remove(id)
     }
@@ -185,6 +215,14 @@ impl Display {
     pub fn is_configured(&self, id: SurfaceId) -> bool {
         self.surface(id)
             .is_some_and(|surface| surface.is_configured())
+    }
+
+    /// Forward to [`Surface::set_title`]. `false` if `id` is not a window.
+    pub fn set_title(&mut self, id: SurfaceId, title: &str) -> bool {
+        self.state
+            .surfaces
+            .get_mut(id)
+            .is_some_and(|surface| surface.set_title(title))
     }
 
     /// Forward to [`Surface::set_size_limits`]. `false` if `id` is not a window.

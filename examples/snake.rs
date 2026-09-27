@@ -5,6 +5,12 @@
 //! the tail to the front of the snake, so the number of surfaces tracks the
 //! snake's length for the whole game.
 //!
+//! The board is a torus. The snake wraps off one edge and arrives on the other,
+//! so `Pos::step` is a `rem_euclid` rather than a bounds check, and the edges
+//! are not a way to lose. Running into itself is the only thing that is, and it
+//! ends the game: the board is held still for a moment, then every tile surface
+//! is removed and a new game is laid out in the same window.
+//!
 //! The game runs on a timer. That is the whole reason this example is async:
 //! `Display::dispatch` sleeps inside the compositor's socket, so a blocking
 //! loop has no way to wake up on its own and nothing can advance unless the user
@@ -12,7 +18,7 @@
 //! the socket and the pieces of the read protocol, and the event loop here is
 //! ordinary `tokio::select!` over that socket and a `tokio::time` interval.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use aufhebung::{
@@ -34,21 +40,35 @@ const CELL: i32 = 24;
 /// How long the snake waits between steps.
 const STEP: Duration = Duration::from_millis(180);
 
+/// How long the final board is held still, and the title flashed, before the
+/// next game starts.
+const PAUSE: Duration = Duration::from_millis(3_000);
+
+/// One half of a title flash: the title alternates every `FLASH`.
+const FLASH: Duration = Duration::from_millis(450);
+
+/// The window title while the game is being played, with the score appended.
+const TITLE: &str = "snake";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Pos(i32, i32);
 
 impl Pos {
+    /// One cell in `dir`, wrapping around the edges.
+    ///
+    /// The board is a torus: leaving one side arrives on the other, so `rem_euclid`
+    /// rather than a bounds check, and the snake can run off the top and come
+    /// back in at the bottom. The only way to lose is to run into the snake.
     fn step(self, dir: Pos) -> Pos {
-        Pos(self.0 + dir.0, self.1 + dir.1)
+        Pos(
+            (self.0 + dir.0).rem_euclid(GRID),
+            (self.1 + dir.1).rem_euclid(GRID),
+        )
     }
 
     fn opposite(self) -> Pos {
         Pos(-self.0, -self.1)
     }
-}
-
-fn inside(p: Pos) -> bool {
-    (0..GRID).contains(&p.0) && (0..GRID).contains(&p.1)
 }
 
 #[derive(Clone, Copy)]
@@ -90,7 +110,12 @@ struct Game {
     wanted: Pos,
     food: Option<Tile>,
     score: usize,
-    over: bool,
+    /// When the snake ran into itself, if it has. The next game starts a
+    /// [`PAUSE`] later, and the title flashes in between.
+    dead: Option<Instant>,
+    /// The last blink half written to the title, so a tick landing in the same
+    /// half does not repeat the request.
+    flash: Option<u128>,
     rng: rand::rngs::ThreadRng,
 }
 
@@ -106,7 +131,8 @@ impl Game {
             wanted: Pos(0, 1),
             food: None,
             score: 0,
-            over: false,
+            dead: None,
+            flash: None,
             rng: rand::rng(),
         }
     }
@@ -166,8 +192,13 @@ impl Game {
         display.commit(self.window, &self.bg);
     }
 
-    /// Lay out the opening position. Called once the real cell size is known.
+    /// Lay out the opening position of a game. Called once the real cell size is
+    /// known, and again for every replay.
     fn start(&mut self, display: &mut Display) {
+        self.score = 0;
+        self.dead = None;
+        self.flash = None;
+
         let head = Pos(GRID / 2, GRID / 2);
         self.dir = Pos(0, 1);
         self.wanted = self.dir;
@@ -182,11 +213,65 @@ impl Game {
         let pos = self.free_cell();
         let id = self.spawn(display, pos, Ink::Food);
         self.food = Some(Tile { pos, id });
+
+        self.set_title(display);
+    }
+
+    /// Put the score in the window title, so it is readable from the task bar
+    /// without watching the board.
+    fn set_title(&mut self, display: &mut Display) {
+        display.set_title(self.window, &format!("{TITLE} — score {}", self.score));
+    }
+
+    /// Clear the board and start again in the same window.
+    ///
+    /// Every tile surface is removed rather than reused. A game that ended at
+    /// length 30 would otherwise leave 27 surfaces behind for the next game,
+    /// which grows without bound over a long session; the tiles are cheap to
+    /// make and the game is short. The window itself is kept, so this does not
+    /// flicker the toplevel or re-run the configure handshake.
+    fn restart(&mut self, display: &mut Display) {
+        for tile in self.body.drain(..) {
+            display.remove_surface(tile.id);
+        }
+        if let Some(food) = self.food.take() {
+            display.remove_surface(food.id);
+        }
+        self.start(display);
     }
 
     fn step(&mut self, display: &mut Display) {
         // Nothing to move until the board is laid out.
-        if self.over || self.body.is_empty() {
+        if self.body.is_empty() {
+            return;
+        }
+
+        // Hold the final board still long enough to see what went wrong, then
+        // play again. Restarting on the tick after the pause elapses, so the
+        // hold lasts a whole number of steps and never a fraction of one.
+        //
+        // The title flashes for as long as the hold lasts, so the state is
+        // obvious even if the board is not the thing being looked at. It blinks
+        // against an empty title rather than against the score, which reads more
+        // like a game over than a number does. Driven from elapsed time rather
+        // than a toggle, so the rate does not drift with `STEP` and a late tick
+        // still lands on the right half.
+        if let Some(died) = self.dead {
+            // Which half of the blink this is. A half lasts `FLASH` but a tick
+            // lands every `STEP`, so the same half is usually seen two or three
+            // times over; remembering the last one keeps the request from being
+            // repeated unchanged. Lit on the even halves, so the notice is up on
+            // the first tick after the crash rather than a beat after it.
+            let half = died.elapsed().as_millis() / FLASH.as_millis();
+            if self.flash != Some(half) {
+                self.flash = Some(half);
+                let on = half.is_multiple_of(2);
+                display.set_title(self.window, if on { "GAME OVER!" } else { "" });
+            }
+            if Instant::now() < died + PAUSE {
+                return;
+            }
+            self.restart(display);
             return;
         }
 
@@ -195,15 +280,14 @@ impl Game {
             self.dir = self.wanted;
         }
 
+        // The board wraps, so the edges are not a way to lose. Running into
+        // yourself is the only thing that is.
         let next = self.body[0].pos.step(self.dir);
-        if !inside(next) {
-            self.over = true;
-            println!("into the wall — score {}", self.score);
-            return;
-        }
         if self.body.iter().any(|t| t.pos == next) {
-            self.over = true;
-            // Leave a mark where it happened, so the board shows the mistake.
+            self.dead = Some(Instant::now());
+            // Leave a mark where it happened, so the board shows the mistake
+            // through the pause. It rides on `body` so that the restart clears
+            // it along with everything else.
             let id = self.spawn(display, next, Ink::Food);
             self.body.push(Tile { pos: next, id });
             println!("into yourself — score {}", self.score);
@@ -226,6 +310,7 @@ impl Game {
             self.body.insert(0, Tile { pos: next, id });
 
             self.score += 1;
+            self.set_title(display);
             println!("ate — score {}, length {}", self.score, self.body.len());
 
             // Pick the new cell before dropping the old food, so the old cell is

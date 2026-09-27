@@ -311,6 +311,34 @@ impl Surface {
         }
     }
 
+    /// Change a toplevel's title. `false`, having changed nothing, for any role
+    /// other than a window.
+    ///
+    /// Unlike [`set_position`](Self::set_position) and
+    /// [`set_size_limits`](Self::set_size_limits), this is *not* double-buffered:
+    /// the compositor shows the new title as soon as it reads the request, with
+    /// no commit needed and no ordering to get right. That makes it safe to call
+    /// as often as the title should change — every score, say.
+    ///
+    /// Takes `&mut self` unlike the other setters, because [`title`](Self::title)
+    /// reports the stored value and should not go stale behind a `&self`.
+    pub fn set_title(&mut self, title: &str) -> bool {
+        let SurfaceRoleObject::Window {
+            toplevel,
+            title: current,
+            ..
+        } = &mut self.role
+        else {
+            return false;
+        };
+        current.clear();
+        current.push_str(title);
+        // This revision of wayland-protocols takes string arguments by value, so
+        // the request needs its own copy of the title.
+        toplevel.set_title(title.to_owned());
+        true
+    }
+
     /// Whether the compositor asked this toplevel to close.
     pub fn should_close(&self) -> bool {
         matches!(
