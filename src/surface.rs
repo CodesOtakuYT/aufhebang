@@ -56,6 +56,7 @@ pub struct SurfaceInfo {
 }
 
 impl Surface {
+    #[expect(clippy::new_ret_no_self)]
     pub fn new(
         globals: &Globals,
         surfaces: &mut SlotMap<SurfaceId, Surface>,
@@ -64,8 +65,7 @@ impl Surface {
     ) -> Result<SurfaceId, SurfaceError> {
         let subsurface_parent = match info.role {
             SurfaceRole::Subsurface { parent, .. } => {
-                let surface = surfaces.get(parent).map(|s| s.surface.clone());
-                surface
+                surfaces.get(parent).map(|s| s.surface.clone())
             }
             _ => None,
         };
@@ -131,15 +131,15 @@ impl Surface {
     }
 
     pub fn is_window(&self) -> bool {
-        match &self.role {
+        matches!(
+            &self.role,
             SurfaceRoleObject::Window {
                 xdg_surface,
                 toplevel,
                 deco,
                 should_close,
-            } => true,
-            _ => false,
-        }
+            }
+        )
     }
 }
 
