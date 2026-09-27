@@ -72,8 +72,8 @@ compositor has to say how big the window is first.
 - **`SurfaceRole`** — `Window { title }` for a toplevel, `Subsurface { parent, x, y, sync }`
   for a positioned sub-surface, or `None` for a bare `wl_surface`.
 - **`Surface`** — `commit` attaches a buffer, scales it to the surface, and damages it in
-  full; `set_position` moves a sub-surface; `is_configured` reports whether a toplevel may
-  carry a buffer yet.
+  full; `set_position` moves a sub-surface; `set_size_limits` constrains how far a toplevel
+  may be resized; `is_configured` reports whether a toplevel may carry a buffer yet.
 - **`Display::translate_char`** — a key as a character, including the cursor keys.
 - **`Color`** — 8 bits per channel. `add_color` turns one into a `wl_buffer` that fills a
   surface, which is enough to draw something before you have a buffer pipeline.

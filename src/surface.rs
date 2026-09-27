@@ -253,6 +253,42 @@ impl Surface {
         }
     }
 
+    /// Constrain the sizes the compositor may configure this toplevel to.
+    ///
+    /// `None` leaves that bound to the compositor, which is what never having
+    /// called this means. Passing the same size as both bounds is how a window
+    /// is made fixed: there is then no smaller size to shrink to and no larger
+    /// one to grow to.
+    ///
+    /// Both bounds are in window geometry coordinates — the region
+    /// `set_window_geometry` describes, which this library anchors at the
+    /// top-left corner — and a bound of zero, which is what `None` sends, means
+    /// no opinion rather than no size.
+    ///
+    /// **Double-buffered, like [`set_position`](Self::set_position).** It takes
+    /// effect on the next [`commit`](Self::commit), so call it before the commit
+    /// meant to carry it. For a toplevel that is the first commit answering its
+    /// configure, so calling this right after the surface is added is early
+    /// enough. Setting it later is not a protocol error, it just leaves the
+    /// window resizable until the next commit.
+    ///
+    /// The compositor may ignore either bound, which is the point of the wording
+    /// in the protocol: a client that cannot cope with being resized still has
+    /// to cope with being resized.
+    ///
+    /// Returns `false`, having changed nothing, for any role other than a window.
+    pub fn set_size_limits(&self, min: Option<(i32, i32)>, max: Option<(i32, i32)>) -> bool {
+        let SurfaceRoleObject::Window { toplevel, .. } = &self.role else {
+            return false;
+        };
+        // Zero is the protocol's "no opinion", so an absent bound is a zero.
+        let (min_width, min_height) = min.unwrap_or((0, 0));
+        let (max_width, max_height) = max.unwrap_or((0, 0));
+        toplevel.set_min_size(min_width, min_height);
+        toplevel.set_max_size(max_width, max_height);
+        true
+    }
+
     /// Whether a buffer may be committed to this surface yet.
     ///
     /// `false` only for a toplevel the compositor has not configured yet.

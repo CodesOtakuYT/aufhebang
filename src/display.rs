@@ -187,6 +187,17 @@ impl Display {
             .is_some_and(|surface| surface.is_configured())
     }
 
+    /// Forward to [`Surface::set_size_limits`]. `false` if `id` is not a window.
+    pub fn set_size_limits(
+        &self,
+        id: SurfaceId,
+        min: Option<(i32, i32)>,
+        max: Option<(i32, i32)>,
+    ) -> bool {
+        self.surface(id)
+            .is_some_and(|surface| surface.set_size_limits(min, max))
+    }
+
     /// Claim the right to read from the socket.
     ///
     /// This is the part of a non-blocking dispatch that cannot be folded into a

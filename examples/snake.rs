@@ -263,15 +263,27 @@ async fn main() -> Result<()> {
         food: display.add_color(Color::hex(0xe0_50_50)),
     };
 
+    let board = GRID * CELL;
     let window = display
         .add_surface(SurfaceInfo {
-            width: GRID * CELL,
-            height: GRID * CELL,
+            width: board,
+            height: board,
             role: SurfaceRole::Window {
                 title: "snake".into(),
             },
         })
         .expect("surface id space exhausted");
+
+    // A fixed-size window, because the board is laid out once and never again.
+    // The tiles are a grid of cells, so a resize would have to rebuild the whole
+    // snake to stay square, and the game is short enough not to be worth it.
+    //
+    // The limits are double-buffered, so they have to be set before the first
+    // commit that should carry them. That is the first commit answering the
+    // configure, which happens further down — so setting them here is early
+    // enough, whereas setting them after a commit would leave the window
+    // resizable until the next one.
+    display.set_size_limits(window, Some((board, board)), Some((board, board)));
 
     let mut game = Game::new(window, bg, inks);
 
@@ -343,7 +355,9 @@ async fn main() -> Result<()> {
                 } => {
                     // Lay out once, at the first configure. A later resize is
                     // not handled: the tiles keep the cell size decided here, so
-                    // a smaller window would clip the board.
+                    // a smaller window would clip the board. The window asks not
+                    // to be resized, but the compositor may ignore that, so this
+                    // is a fallback rather than a guarantee.
                     if id == window && game.body.is_empty() {
                         game.cell = (width.min(height) / GRID).max(1);
                         // The window has now been configured, so this is the
