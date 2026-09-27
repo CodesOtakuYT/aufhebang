@@ -7,11 +7,18 @@
 //!
 //! # Seats
 //!
+//! A seat is bound when the compositor advertises it, which is not necessarily
+//! at startup: a compositor that gains an input device can add one later, and
+//! withdraws the seat again when it goes away. Nothing has to be set up for
+//! either, but it means a [`SeatId`] only ever names a seat for as long as the
+//! compositor keeps it.
+//!
 //! [`translate_char`](crate::display::Display::translate_char) and
 //! [`translate_key`](crate::display::Display::translate_key) resolve a key
 //! through one seat's keymap and modifier state, so they take a [`SeatId`].
 //! That id is the `id` on the [`SeatEvent`] carrying the key, so translating a
-//! key and handling the event it arrived on are the same step:
+//! key and handling the event it arrived on are the same step. A seat that has
+//! been withdrawn in the meantime answers `None` rather than failing:
 //!
 //! ```no_run
 //! # use aufhebung::{display::Display, state::{Event, SeatEvent}};

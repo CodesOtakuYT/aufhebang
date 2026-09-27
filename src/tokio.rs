@@ -73,13 +73,28 @@ pub enum ReactorError {
 /// A tokio registration for the compositor's socket.
 ///
 /// Made once from a [`Display`] and then reused, rather than registering the fd
-/// again on each wakeup. It borrows nothing: the descriptor belongs to the
-/// connection, so the `Display` may be borrowed mutably while this is awaited.
-/// The registration goes away with the `Reactor`, and the descriptor itself goes
-/// away with the `Display`, which must therefore outlive it.
+/// again on each wakeup. It borrows nothing, so the `Display` may be borrowed
+/// mutably while this is awaited.
+///
+/// It does keep the connection open. The socket stays valid until the last
+/// handle to it is gone, so a `Reactor` outliving its `Display` keeps polling a
+/// live socket whose protocol objects are already destroyed — safe, and almost
+/// certainly not what was meant. The `Display` should therefore outlive it, and
+/// the registration goes away with the `Reactor`.
 pub struct Reactor {
     socket: AsyncFd<Socket>,
 }
+
+/// The properties that let a `Reactor` be moved between threads, asserted here
+/// so that a change to [`Socket`] cannot quietly take them away.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+
+    assert_send::<Socket>();
+    assert_sync::<Socket>();
+    assert_send::<Reactor>();
+};
 
 impl Reactor {
     /// Register the connection's socket with the current tokio reactor.

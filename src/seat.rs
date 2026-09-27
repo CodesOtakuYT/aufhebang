@@ -3,6 +3,10 @@
 //! A seat's keyboard exists only once the compositor has advertised one, and the
 //! [`SeatId`] to resolve its keys with is the one its [`SeatEvent`]s carry. See
 //! [the `state` module docs](crate::state#seats).
+//!
+//! Neither the seat nor its keyboard outlives the compositor's own: a seat
+//! advertised after startup is bound as it arrives, and one withdrawn takes its
+//! keymap and focus with it.
 
 use std::os::fd::AsFd;
 
@@ -43,6 +47,9 @@ new_key_type! {
 /// [`SeatEvent`](crate::state::SeatEvent) carries, and the ids themselves only
 /// from those events.
 pub(crate) struct Seat {
+    /// The name the compositor advertised this seat's global under, kept so
+    /// that withdrawing that global can find the seat again.
+    pub(crate) global_name: u32,
     // Never read, but held so the proxy outlives the seat's events — the same
     // reasoning as the keyboard proxy below. `pub` used to hide this from
     // dead_code.

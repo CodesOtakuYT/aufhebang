@@ -77,6 +77,11 @@ pub enum SurfaceRole {
         /// this.
         sync: bool,
     },
+    /// A bare `wl_surface`.
+    ///
+    /// Unlike [`Subsurface`](Self::Subsurface), this needs nothing the
+    /// compositor might not have, so it is available wherever the rest of this
+    /// crate is.
     None,
 }
 
@@ -94,7 +99,9 @@ enum SurfaceRoleObject {
     Window {
         xdg_surface: XdgSurface,
         toplevel: XdgToplevel,
-        deco: ZxdgToplevelDecorationV1,
+        /// `None` on a compositor without xdg-decoration, where the server-side
+        /// decoration this crate asks for is already what it would have done.
+        deco: Option<ZxdgToplevelDecorationV1>,
         title: String,
         should_close: bool,
         /// Whether the compositor has sent a configure yet. Until it has, the
@@ -116,7 +123,8 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// Returns `None` if the role names a subsurface parent that is not live.
+    /// Returns `None` if a subsurface's parent is not live, or the compositor
+    /// has no `wl_subcompositor`.
     pub(crate) fn insert(
         globals: &Globals,
         surfaces: &mut SlotMap<SurfaceId, Surface>,
@@ -129,10 +137,15 @@ impl Surface {
             role,
         } = info;
 
-        // Resolve the parent before creating anything, so that a dead parent
-        // rejects the request instead of panicking halfway through.
+        // Resolve the parent and the subcompositor before creating anything, so
+        // that a request this connection cannot satisfy is rejected instead of
+        // failing halfway through.
         let parent = match &role {
             SurfaceRole::Subsurface { parent, .. } => Some(surfaces.get(*parent)?.surface.clone()),
+            _ => None,
+        };
+        let subcompositor = match &role {
+            SurfaceRole::Subsurface { .. } => Some(globals.subcompositor.as_ref()?),
             _ => None,
         };
 
@@ -149,10 +162,14 @@ impl Surface {
                         // arguments by value, so keep our own copy to hand back
                         // from `Surface::title`.
                         toplevel.set_title(title.clone());
-                        let deco = globals
-                            .deco_mgr
-                            .get_toplevel_decoration(&toplevel, qh, NoopIgnore);
-                        deco.set_mode(Mode::ServerSide);
+                        // Server-side decoration is what the protocol defaults
+                        // to, so where the compositor offers the protocol this
+                        // request only says so out loud.
+                        let deco = globals.deco_mgr.as_ref().map(|deco_mgr| {
+                            let deco = deco_mgr.get_toplevel_decoration(&toplevel, qh, NoopIgnore);
+                            deco.set_mode(Mode::ServerSide);
+                            deco
+                        });
                         SurfaceRoleObject::Window {
                             xdg_surface,
                             toplevel,
@@ -163,14 +180,16 @@ impl Surface {
                         }
                     }
                     SurfaceRole::Subsurface { x, y, sync, .. } => {
-                        let subsurface = globals.subcompositor.get_subsurface(
-                            &surface,
-                            parent
-                                .as_ref()
-                                .expect("subsurface role always resolves a parent"),
-                            qh,
-                            NoopIgnore,
-                        );
+                        let subsurface = subcompositor
+                            .expect("a subsurface role resolves a subcompositor")
+                            .get_subsurface(
+                                &surface,
+                                parent
+                                    .as_ref()
+                                    .expect("subsurface role always resolves a parent"),
+                                qh,
+                                NoopIgnore,
+                            );
                         subsurface.set_position(x, y);
                         if sync {
                             subsurface.set_sync();
@@ -207,10 +226,21 @@ impl Surface {
     ///
     /// A toplevel must be committed in response to [`SurfaceEvent::Configure`],
     /// which is emitted only after the configure has been acked; committing one
-    /// before its first configure is a protocol error. Subsurfaces get no
+    /// before its first configure is a protocol error that takes the connection
+    /// down with it, so this asserts the handshake is done. Subsurfaces get no
     /// configure events, so they may be committed whenever. A single buffer may
     /// back any number of surfaces.
     pub fn commit(&self, buffer: &WlBuffer) {
+        // The cost of getting this wrong is not a rejected commit but a dead
+        // connection, and nothing about the failure says which commit was at
+        // fault. A timer that fires before the first configure has been
+        // dispatched is the usual way to lose the race, and it looks exactly
+        // like a correct commit until the process is gone.
+        debug_assert!(
+            self.is_configured(),
+            "committing a buffer to a toplevel the compositor has not configured"
+        );
+
         self.surface.attach(Some(buffer), 0, 0);
         // Surface coordinates, so the viewport's scaling needs no accounting:
         // `set_destination` below makes the surface exactly `width` x `height`.
@@ -347,7 +377,9 @@ impl Drop for Surface {
                 deco,
                 ..
             } => {
-                deco.destroy();
+                if let Some(deco) = deco {
+                    deco.destroy();
+                }
                 toplevel.destroy();
                 xdg_surface.destroy();
             }

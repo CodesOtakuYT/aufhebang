@@ -143,6 +143,8 @@ A positioned child surface.
 `sync` chooses whether its changes wait for the parent to be committed; see the
 [`surface` module documentation](https://docs.rs/aufhebung/latest/aufhebung/surface/index.html)
 before changing it.
+Needs a compositor that advertises `wl_subcompositor`; `add_surface` answers
+`None` on one that does not.
 
 ```rust
 SurfaceRole::None
@@ -183,6 +185,9 @@ modifier state, so they take a `SeatId` — the `id` on the `SeatEvent` that
 carried the key.
 Translating a key and handling the event it arrived on are therefore the same
 step.
+A seat is bound when the compositor advertises it, which may be after startup if
+an input device appears, and a `SeatId` stops resolving once the compositor
+withdraws that seat.
 
 ## Tokio
 
@@ -216,6 +221,10 @@ The feature is disabled by default.
 `Reactor` is a convenience rather than a second abstraction: it is built on the
 same public `Display` operations that are available without it, so another
 runtime can drive those four calls directly instead.
+It borrows nothing, so the `Display` can be borrowed mutably while it waits, and
+it holds the connection open for as long as it lives — the `Display` should
+still outlive it, since everything the `Display` owns is gone once it is
+dropped.
 
 ## Why not winit?
 

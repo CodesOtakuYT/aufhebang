@@ -49,12 +49,17 @@ use crate::{
     surface::{Surface, SurfaceId, SurfaceInfo},
 };
 
-/// An owned, copyable handle to the connection's socket.
+/// An owned handle to the connection's socket.
 ///
-/// The descriptor belongs to the connection, not to the `Display`, so this does
-/// not borrow it — but it is only valid while that `Display` is alive, and is
-/// closed with it. Meant for readiness APIs that need to own what they poll,
-/// such as `tokio`'s `AsyncFd`, which cannot hold a [`BorrowedFd`].
+/// It holds a handle to the connection rather than a bare descriptor number, so
+/// the socket cannot be closed and recycled while this is still being polled.
+/// `Send` and `Sync` follow from that instead of having to be asserted.
+///
+/// It does not keep the *display* alive. Everything a [`Display`] owns is gone
+/// once it is dropped, so a `Socket` outliving its `Display` finds a valid,
+/// readable socket attached to a connection that has no client left on it. Meant
+/// for readiness APIs that need to own what they poll, such as `tokio`'s
+/// `AsyncFd`, which cannot hold a [`BorrowedFd`].
 ///
 /// ```
 /// # use aufhebung::display::Display;
@@ -63,27 +68,20 @@ use crate::{
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Socket {
-    fd: RawFd,
+    conn: Connection,
 }
-
-// SAFETY: the descriptor is owned by the connection and is only ever read, so
-// sharing a copy of the handle cannot cause two threads to write to it.
-unsafe impl Send for Socket {}
-unsafe impl Sync for Socket {}
 
 impl AsFd for Socket {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        // SAFETY: `fd` is a live descriptor owned by the connection, and the
-        // borrow is tied to `&self`, so it cannot outlive the handle.
-        unsafe { BorrowedFd::borrow_raw(self.fd) }
+        self.conn.as_fd()
     }
 }
 
 impl AsRawFd for Socket {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd
+        self.conn.as_raw_fd()
     }
 }
 
@@ -91,6 +89,11 @@ pub struct Display {
     event_queue: EventQueue<State>,
     qh: QueueHandle<State>,
     state: State,
+    /// Held so [`socket`](Self::socket) can hand out a handle that keeps the
+    /// connection alive, rather than a descriptor number whose validity is
+    /// tied to a `Display` that may already be gone. Declared last so the queue
+    /// and the state it dispatches into are dropped first.
+    conn: Connection,
 }
 
 /// Re-exported so it stays nameable now that the `globals` module is private:
@@ -108,8 +111,6 @@ pub enum DisplayError {
 impl Display {
     pub fn new() -> Result<Self, DisplayError> {
         let conn = unsafe { Connection::connect_to_env() }?;
-        // The queue holds its own handle to the connection, so the local one can
-        // be dropped here.
         let event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
         let globals = Globals::new(&conn, &qh)?;
@@ -120,6 +121,7 @@ impl Display {
             events: Default::default(),
         };
         Ok(Self {
+            conn,
             event_queue,
             qh,
             state,
@@ -128,7 +130,10 @@ impl Display {
 
     /// Create a surface with the given role.
     ///
-    /// Returns `None` if the role names a subsurface parent that is not live.
+    /// Returns `None` when the role cannot be satisfied: a
+    /// [`Subsurface`](crate::surface::SurfaceRole::Subsurface) whose parent is
+    /// no longer live, or one on a compositor that has no `wl_subcompositor` at
+    /// all.
     pub fn add_surface(&mut self, info: SurfaceInfo) -> Option<SurfaceId> {
         Surface::insert(
             &self.state.globals,
@@ -201,12 +206,12 @@ impl Display {
         self.event_queue.as_fd()
     }
 
-    /// The same descriptor as [`connection_fd`](Self::connection_fd), but
-    /// detached from the `Display`'s lifetime, for readiness APIs that need to
-    /// own what they poll. See [`Socket`].
+    /// The same descriptor as [`connection_fd`](Self::connection_fd), but held
+    /// by a handle that owns the connection behind it, for readiness APIs that
+    /// need to own what they poll. See [`Socket`].
     pub fn socket(&self) -> Socket {
         Socket {
-            fd: self.event_queue.as_fd().as_raw_fd(),
+            conn: self.conn.clone(),
         }
     }
 
@@ -214,6 +219,10 @@ impl Display {
     ///
     /// Shorthand for looking the surface up and committing, which most mutation
     /// is. Returns `false` if the id is no longer live, having changed nothing.
+    ///
+    /// Committing to a toplevel before the compositor has configured it is a
+    /// protocol error, not a failed commit; see
+    /// [`is_configured`](Self::is_configured).
     pub fn commit(&self, id: SurfaceId, buffer: &WlBuffer) -> bool {
         self.surface(id).is_some_and(|surface| {
             surface.commit(buffer);
