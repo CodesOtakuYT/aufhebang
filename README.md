@@ -4,7 +4,7 @@ A small, low-level windowing library for native Wayland applications.
 
 `aufhebung` handles the Wayland bookkeeping that sits between an application and
 `wl_surface`: surface roles, xdg-shell configure handshakes, toplevel metadata,
-keyboard state, and event collection.
+keyboard and pointer input, and event collection.
 It does **not** own your event loop.
 Buffers, timing, scheduling, and runtime integration remain in the application.
 The core API is synchronous and blocking; the underlying Wayland socket is also
@@ -12,9 +12,10 @@ available directly, so an application can integrate it with any event loop or
 runtime it wants.
 
 > **Early software.** The API is unstable.
-> The library currently focuses on windows, sub-surfaces, buffers, and keyboard input.
+> The library currently focuses on windows, sub-surfaces, buffers, and keyboard
+> and pointer input.
 
-## Example
+## Examples
 
 ![Snake example](assets/snake.png)
 
@@ -34,6 +35,23 @@ Use `w/a/s/d`, `h/j/k/l`, or the arrow keys to steer.
 Press `p` or Space to pause and `q` to quit.
 After a collision the board stays still while the title flashes; once the flash
 ends, any key starts another round.
+
+```sh
+cargo run --example cookie-clicker
+```
+
+The Cookie Clicker example is the other half of what the library offers, and the
+one that needs no features: it is driven entirely by the pointer, so the
+blocking `Display::dispatch` loop is the whole runtime.
+Its window is a background, and the cookie and the oven are sub-surfaces on top
+of it, each a solid colour.
+Click the cookie to bake; click the oven to buy one that bakes more per click.
+Both are recognised by the id on the `PointerEvent::Button`, with no geometry to
+work out and no position conversion to do — a sub-surface reports the surface it
+was hit on. The cookie darkens with every oven bought and lightens under the
+pointer, and the title carries the score.
+
+Press `q` to quit.
 
 ## Usage
 
@@ -188,6 +206,33 @@ step.
 A seat is bound when the compositor advertises it, which may be after startup if
 an input device appears, and a `SeatId` stops resolving once the compositor
 withdraws that seat.
+A seat need not have a keyboard or a pointer, and neither is used before the
+compositor advertises it.
+
+### Pointers
+
+A pointer reports through `SeatEvent::Pointer`, carrying a `PointerEvent`:
+
+* `Enter`, `Leave`, and `Motion` name the surface the pointer is on, and the
+  first two also give the position.
+* `Button` adds the time, the `Button` that went down or up, and whether it was
+  pressed. The position here is the one from the last `Enter` or `Motion`:
+  the protocol's own button event names no coordinates, so this is the only way
+  to know where a click landed.
+* `Axis` is scroll wheel movement, as a direction and a value.
+
+Positions are relative to the surface named, so a sub-surface reports its own
+origin and an application does not have to convert them to the parent. That also
+means a click needs no hit testing: comparing the surface id is enough to know
+what was clicked.
+
+Events for surfaces this connection did not create are ignored, exactly as they
+are for the keyboard, so a pointer moving over some other window's surface is
+not reported at all.
+
+The pointer proxy is not kept, on the same reasoning as the keyboard's: this
+crate sends no request on it — there is no cursor surface and no pointer
+constraints — so there is nothing to hold it for.
 
 ## Tokio
 
@@ -238,7 +283,7 @@ Wayland-native layer.
 | ----------------------- | ---------------------------------------- | --------------------------------- |
 | Platforms               | Windows, macOS, Linux, Android, iOS, web | Wayland                           |
 | Window abstraction      | `Window`, `ApplicationHandler`           | `wl_surface`, roles, configs      |
-| Pointer input           | Yes                                      | No                                |
+| Pointer input           | Yes                                      | Buttons, motion, scroll           |
 | Text input              | Yes                                      | No                                |
 | Clipboard               | Yes                                      | No                                |
 | Monitor/output handling | Yes                                      | No                                |
@@ -287,7 +332,6 @@ the compositor as part of `wl_keyboard.keymap` and is compiled in memory.
 This is deliberately a small API.
 It currently does **not** provide:
 
-* pointer input;
 * text input;
 * clipboard support;
 * `wl_output` / monitor enumeration;
@@ -298,6 +342,16 @@ It currently does **not** provide:
 Keyboard handling exposes both translated characters and raw keysyms.
 Keys that do not correspond to a character, beyond the navigation keys handled by
 `translate_char`, are available through `translate_key`.
+
+Pointer handling reports positions, buttons, and scroll.
+A sub-surface's size is fixed when it is created — only a toplevel is ever
+configured again — so there is no way to resize one, and no way to resize a
+window directly either; a client asks the compositor to resize through
+`set_size_limits` and a `Configure` reports the result.
+
+The seat is bound at version 1, so pointer events above that version
+(`frame`, `axis_source`, `axis_stop`, `axis_discrete`, and later additions) are
+not reported, and touch is not handled at all.
 
 ## Requirements
 

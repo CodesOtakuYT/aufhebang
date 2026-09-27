@@ -140,6 +140,7 @@ fn fill_seat(seats: &mut SlotMap<SeatId, Option<Seat>>, global_name: u32, seat: 
         global_name,
         seat,
         keyboard: None,
+        pointer: None,
     });
 }
 

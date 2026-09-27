@@ -2,7 +2,7 @@
 //!
 //! `aufhebung` handles the Wayland bookkeeping that sits between an application
 //! and `wl_surface`: surface roles, xdg-shell configure handshakes, toplevel
-//! metadata, keyboard state, and event collection. Buffers, timing,
+//! metadata, keyboard and pointer input, and event collection. Buffers, timing,
 //! scheduling, and runtime integration remain in the application.
 //!
 //! It does not own your event loop. The core API is synchronous and blocking,
@@ -10,6 +10,8 @@
 //! into any event loop or runtime.
 //!
 //! > **Early software.** The API is unstable.
+//! > The library currently focuses on windows, sub-surfaces, buffers, and
+//! > keyboard and pointer input.
 //!
 //! # A smallest application
 //!
@@ -68,7 +70,8 @@
 //!   with.
 //! - [`state`] — the [`Event`](state::Event) values drained from the
 //!   connection.
-//! - [`seat`] — keyboards and keymap translation.
+//! - [`seat`] — keyboards and pointers, and the keymap translation the
+//!   keyboard's input goes through.
 //! - [`color`] — colours for
 //!   [`Display::add_color`](display::Display::add_color).
 //!

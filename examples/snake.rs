@@ -538,7 +538,7 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    SeatEvent::RepeatInfo { .. } => {}
+                    SeatEvent::RepeatInfo { .. } | SeatEvent::Pointer(_) => {}
                 },
             }
         }
