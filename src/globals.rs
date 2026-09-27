@@ -1,7 +1,10 @@
 use wayland_client::{
     Connection, Dispatch, NoopIgnore, QueueHandle,
     globals::{BindError, GlobalError, GlobalList, GlobalListHandler},
-    protocol::{wl_compositor::WlCompositor, wl_subcompositor::WlSubcompositor},
+    protocol::{
+        wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat,
+        wl_subcompositor::WlSubcompositor,
+    },
 };
 use wayland_protocols::{
     wp::{
@@ -25,6 +28,8 @@ pub struct Globals {
 
     pub wm_base: XdgWmBase,
     pub deco_mgr: ZxdgDecorationManagerV1,
+
+    pub seat: WlSeat,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -35,7 +40,7 @@ pub enum GlobalsError {
     BindError(#[from] BindError),
 }
 
-struct GlobalData;
+pub struct GlobalData;
 
 impl Globals {
     pub fn new(conn: &Connection, qh: &QueueHandle<State>) -> Result<Self, GlobalsError> {
@@ -56,6 +61,8 @@ impl Globals {
         let deco_mgr =
             global_list.bind_singleton::<ZxdgDecorationManagerV1, _, _>(1..=1, qh, NoopIgnore)?;
 
+        let seat = global_list.bind_singleton::<WlSeat, _, _>(0..=1, qh, GlobalData)?;
+
         Ok(Self {
             compositor,
             viewporter,
@@ -63,6 +70,7 @@ impl Globals {
             subcompositor,
             wm_base,
             deco_mgr,
+            seat,
         })
     }
 }
