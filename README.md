@@ -90,6 +90,48 @@ alongside the examples so that the example needs no network; see
 Press `1` for the image at its own size, `2` stretched over the window, and `q`
 to quit.
 
+```sh
+cargo run --example text
+```
+
+The Text example is the Pixels example with a string instead of a picture, and it
+is the case where a text bitmap must never be scaled.
+`add_pixels` is an upload and not a draw: it does not composite, and a text
+rasterizer cannot help with that, because none of them produce finished pixels.
+`ab_glyph` hands back a coverage value per pixel, so the example blends that into
+pre-multiplied ARGB and uploads the result — about thirty lines, which is the
+whole of the integration and the reason there is no text feature here.
+
+That leaves the placement, and `1`, `2` and `3` switch between three commits:
+
+* `1` is 32px text on a sub-surface with `commit_unscaled`, one pixel to one
+  pixel. The only correct way to draw it.
+* `2` is *the same buffer* on a sub-surface with `commit`, which stretches it to
+  fill. In the Pixels example that is merely soft; here it is visibly wrong,
+  because antialiased edges are correct for exactly one size.
+* `3` is the same string rasterized at 64px and committed the same way as `1`.
+  Sharper than `1`, and the buffer is twice the size — which is what to do
+  instead of `2`: rasterize at the size the text will be shown at, and upload
+  that.
+
+`2` stretches into a sub-surface rather than into the window, and that is not
+cosmetic: a text raster is transparent around its ink, so committing one to the
+window makes the *window* transparent, and the see-through is what you end up
+looking at instead of the softness.
+
+There is no key that changes the size, because `add_pixels` is a one-shot upload
+and every size that could be reached has to have been uploaded already.
+
+The font is Montserrat subset to printable ASCII, 18 KB from a 435 KB original
+and committed alongside the examples so the example renders the same thing
+everywhere; see [`assets/README.md`](assets/README.md) for the licence and the
+command that regenerates it.
+`ab_glyph` outlines and rasterizes a glyph and does nothing else, so there is no
+shaping, kerning or hinting here, and the example says so rather than quietly
+rendering Latin without any of it.
+
+Press `q` to quit.
+
 ## Usage
 
 The smallest application can use the blocking dispatcher directly:
@@ -433,6 +475,48 @@ image = { version = "0.25", default-features = false, features = ["webp"] }
 The feature is disabled by default, so a program that builds its own pixels — as
 the Pixels example does — pays nothing for it.
 
+## Text
+
+Drawing text is `add_pixels` with the coverage blended first, and the library
+has no opinion about which rasterizer does the covering.
+`Display::add_pixels` takes finished `u32` values and does not composite, and no
+text crate produces finished values: they all produce coverage, an alpha bitmap,
+or a list of positioned quads, so every one of them needs the same step in
+between.
+
+The step is short. `Color::channels` already pre-multiplies by alpha, in the
+protocol's own percentage scale, so narrowing it with a shift gives back 8-bit
+channels already scaled by the ink's alpha; coverage scales them the rest of the
+way, and one source-over blend per pixel finishes the job.
+See [`examples/text.rs`](examples/text.rs) for the whole thing.
+
+That is why there is no `text` feature.
+A feature here would mean re-exporting somebody else's rasterizer, which is a
+larger commitment than the thirty lines it replaces, and it would put a font
+engine in the dependency tree of a crate whose whole argument is that it does not
+own your event loop. As a dev-dependency the same crate costs an example nothing
+and a user nothing.
+
+Picking one is a separate question, and the short version:
+
+| Crate | Added crates | Shaping | Hinting | Notes |
+|---|---:|---|---|---|
+| [`ab_glyph`] | 4 | No | No | The example's choice. Smallest tree, and `outline_glyph(..).draw(..)` writes coverage straight into an ARGB buffer, so it is closest to `add_pixels`. |
+| [`fontdue`] | 8 | No | No | Same absence of shaping. Its one differentiator is LCD subpixel antialiasing, which a compositor cannot use. |
+| [`swash`] | 13 | Yes | Yes | Shapes in-tree, so no `rustybuzz`/`harfrust` dependency of its own. |
+| [`cosmic-text`] | 39 | Yes | Yes | Full layout: bidi, line breaking, font fallback. The MSRV is 1.89. |
+| [`parley`] | 53 | Yes | Yes | Layout without a rendering backend. |
+| [`allsorts`] | 53 | Yes | Yes | The same, under another name. |
+
+Avoid `raqote` (stale, and pulls in `font-kit`), `msdfgen` (a C++ dependency) and
+`font-rs` (2018).
+`harfrust` has replaced `rustybuzz` in both `cosmic-text` and `parley`.
+
+For Latin text in a known font, `ab_glyph` is enough and its four crates are
+cheap. Once the text needs kerning, ligatures, bidirectional reordering, line
+breaking or fallback, the question stops being which rasterizer and becomes which
+layout engine — and that is a much larger dependency than anything in this crate.
+
 ## Why not winit?
 
 For most applications, [winit] is the right choice.
@@ -474,6 +558,12 @@ The Wayland protocol and keyboard handling are implemented without depending on
 the system Wayland or X11 libraries.
 
 [winit]: https://github.com/rust-windowing/winit
+[`ab_glyph`]: https://crates.io/crates/ab_glyph
+[`fontdue`]: https://crates.io/crates/fontdue
+[`swash`]: https://crates.io/crates/swash
+[`cosmic-text`]: https://crates.io/crates/cosmic-text
+[`parley`]: https://crates.io/crates/parley
+[`allsorts`]: https://crates.io/crates/allsorts
 
 ## System libraries
 
@@ -527,6 +617,14 @@ Image decoding is the application's.
 The `image` feature turns a `DynamicImage` into a buffer and knows nothing about
 file formats beyond which two to enable, and it does no resizing: a picture drawn
 at a size other than its own has to be resized first, by the application.
+
+Text rendering is the application's too, and for the same reason.
+There is no font engine, no shaping and no line breaking here, and nothing that
+would let a buffer be scaled without going visibly soft: rasterize the text at
+the size it will be shown at, upload that, and commit it unscaled.
+The blend from coverage to `u32` is the only step the library could have absorbed,
+and it is short enough that an example is a better home for it than a feature;
+see [Text](#text).
 
 The seat is bound at version 1, so pointer events above that version
 (`frame`, `axis_source`, `axis_stop`, `axis_discrete`, and later additions) are
