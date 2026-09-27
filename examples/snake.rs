@@ -31,10 +31,9 @@ use aufhebung::{
 use rand::Rng as _;
 use tokio::time::MissedTickBehavior;
 
-// Re-exported rather than depended on directly: declaring our own
-// `wayland-client` would have to match this crate's git revision exactly, or
-// the `WlBuffer` types would not unify.
-use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
+// A `BufferId` rather than the `wl_buffer` behind it: a proxy is something the
+// holder can destroy, and this library would still be counting it.
+use aufhebung::buffer::BufferId;
 
 const GRID: i32 = 20;
 const CELL: i32 = 24;
@@ -86,14 +85,14 @@ struct Tile {
 }
 
 struct Inks {
-    body: WlBuffer,
-    head: WlBuffer,
-    food: WlBuffer,
+    body: BufferId,
+    head: BufferId,
+    food: BufferId,
 }
 
 struct Game {
     window: SurfaceId,
-    bg: WlBuffer,
+    bg: BufferId,
     inks: Inks,
 
     /// Set from the first configure event.
@@ -114,7 +113,7 @@ struct Game {
 }
 
 impl Game {
-    fn new(window: SurfaceId, bg: WlBuffer, inks: Inks) -> Self {
+    fn new(window: SurfaceId, bg: BufferId, inks: Inks) -> Self {
         Self {
             window,
             bg,
@@ -131,11 +130,11 @@ impl Game {
         }
     }
 
-    fn ink(&self, ink: Ink) -> &WlBuffer {
+    fn ink(&self, ink: Ink) -> BufferId {
         match ink {
-            Ink::Body => &self.inks.body,
-            Ink::Head => &self.inks.head,
-            Ink::Food => &self.inks.food,
+            Ink::Body => self.inks.body,
+            Ink::Head => self.inks.head,
+            Ink::Food => self.inks.food,
         }
     }
 
@@ -193,17 +192,21 @@ impl Game {
             .expect("surface id space exhausted");
 
         display.commit(id, self.ink(ink));
-        display.commit(self.window, &self.bg);
+        display.commit(self.window, self.bg);
         id
     }
 
     /// Move and repaint an existing tile.
     fn place(&self, display: &mut Display, tile: &Tile, ink: Ink) {
-        let surface = display.surface(tile.id).unwrap();
-
-        surface.set_position(tile.pos.0 * self.cell, tile.pos.1 * self.cell);
-        surface.commit(self.ink(ink));
-        display.commit(self.window, &self.bg);
+        // Set through the surface's own handle and committed through the
+        // display's, because that is the shape of the crate: a handle for
+        // things that belong to the surface, and an id for anything needing
+        // two resources at once.
+        if let Some(surface) = display.surface(tile.id) {
+            surface.set_position(tile.pos.0 * self.cell, tile.pos.1 * self.cell);
+        }
+        display.commit(tile.id, self.ink(ink));
+        display.commit(self.window, self.bg);
     }
 
     fn set_title(&mut self, display: &mut Display) {
@@ -476,7 +479,7 @@ async fn main() -> Result<()> {
 
                         // The configure has arrived, so the first buffer commit
                         // is now legal.
-                        display.commit(window, &game.bg);
+                        display.commit(window, game.bg);
                         game.start(&mut display);
                     }
                 }

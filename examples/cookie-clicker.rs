@@ -25,10 +25,9 @@ use aufhebung::{
     surface::{SurfaceId, SurfaceInfo, SurfaceRole},
 };
 
-// Re-exported rather than depended on directly: declaring our own
-// `wayland-client` would have to match this crate's git revision exactly, or
-// the `WlBuffer` types would not unify.
-use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
+// A `BufferId` rather than the `wl_buffer` behind it: a proxy is something the
+// holder can destroy, and this library would still be counting it.
+use aufhebung::buffer::BufferId;
 
 const WIDTH: i32 = 520;
 const HEIGHT: i32 = 380;
@@ -46,12 +45,12 @@ const SHADES: usize = 12;
 
 struct Inks {
     /// One buffer per shade, for the cookie at rest.
-    dough: Vec<WlBuffer>,
+    dough: Vec<BufferId>,
     /// The same shades lightened, for the cookie under the pointer.
-    dough_lit: Vec<WlBuffer>,
+    dough_lit: Vec<BufferId>,
     /// The oven, bright when its price is affordable and dim when it is not.
-    oven_hot: WlBuffer,
-    oven_cold: WlBuffer,
+    oven_hot: BufferId,
+    oven_cold: BufferId,
 }
 
 /// What the next oven costs: ten cookies, doubling. That is the whole reason to
@@ -88,7 +87,7 @@ struct Clicker {
     window: SurfaceId,
     cookie: SurfaceId,
     oven: SurfaceId,
-    bg: WlBuffer,
+    bg: BufferId,
     inks: Inks,
 
     cookies: u32,
@@ -152,16 +151,16 @@ impl Clicker {
             &self.inks.dough
         };
 
-        display.commit(self.cookie, &dough[self.level()]);
+        display.commit(self.cookie, dough[self.level()]);
         display.commit(
             self.oven,
             if self.affordable() {
-                &self.inks.oven_hot
+                self.inks.oven_hot
             } else {
-                &self.inks.oven_cold
+                self.inks.oven_cold
             },
         );
-        display.commit(self.window, &self.bg);
+        display.commit(self.window, self.bg);
     }
 
     /// Bakes, or buys. Returns whether anything changed, so that a click on the

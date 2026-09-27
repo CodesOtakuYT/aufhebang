@@ -23,9 +23,8 @@
 use std::borrow::Cow;
 
 use image::{DynamicImage, RgbaImage};
-use wayland_client::protocol::wl_buffer::WlBuffer;
 
-use crate::display::Display;
+use crate::{buffer::BufferId, display::Display};
 
 /// One `u32` per pixel, in the layout [`add_pixels`] uploads.
 ///
@@ -81,17 +80,17 @@ impl Display {
     /// ```no_run
     /// use aufhebung::display::Display;
     ///
-    /// # fn demo(display: &Display) {
+    /// # fn demo(display: &mut Display) {
     /// // Through this crate's re-export, not a dependency of its own: see the
     /// // re-exports section of the crate docs for why that matters.
     /// let file = aufhebung::image::open("assets/great-wave.jpg").unwrap();
     ///
-    /// // The size to commit at is the *image's*, not the surface's.
-    /// let (width, height) = (file.width() as i32, file.height() as i32);
+    /// // The size to commit at is the buffer's own, which the buffer knows, so
+    /// // `commit_unscaled` needs no size at all.
     /// let Some(buffer) = display.add_image(&file) else {
     ///     return;
     /// };
-    /// # let _ = (width, height, buffer);
+    /// # let _ = buffer;
     /// # }
     /// ```
     ///
@@ -121,7 +120,7 @@ impl Display {
     /// `None` means the image is too large to describe as a buffer, which for
     /// any real photograph means a resolution no display has. As with
     /// `add_pixels`, that is worth reporting rather than working around.
-    pub fn add_image(&self, image: &DynamicImage) -> Option<WlBuffer> {
+    pub fn add_image(&mut self, image: &DynamicImage) -> Option<BufferId> {
         let raster = as_rgba8(image);
         let (width, height) = (raster.width(), raster.height());
 

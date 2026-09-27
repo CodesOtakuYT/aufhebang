@@ -42,6 +42,7 @@ use wayland_client::{
 };
 
 use crate::{
+    buffer::{Buffer, BufferId},
     color::Color,
     globals::Globals,
     mmap::Mmap,
@@ -122,6 +123,7 @@ impl Display {
         let state = State {
             globals,
             surfaces: Default::default(),
+            buffers: Default::default(),
             xkb_ctx: Default::default(),
             events: Default::default(),
         };
@@ -175,23 +177,63 @@ impl Display {
         self.state.surfaces.keys()
     }
 
+    /// A buffer by id, for its size or its own id.
+    ///
+    /// `None` if the id is not one this connection created. There is no way to
+    /// make a `BufferId` that did not come from one of the `add_*` functions,
+    /// so in practice this does not fail — it is here so a `BufferId` stored
+    /// somewhere of your own can be resolved.
+    pub fn buffer(&self, id: BufferId) -> Option<&Buffer> {
+        self.state.buffers.get(id)
+    }
+
+    /// Every buffer created so far, in creation order.
+    ///
+    /// Never shrinks: a buffer the compositor may still be reading cannot be
+    /// forgotten, and nothing here is destroyed. Iterating this is a way to see
+    /// what a program has allocated, not a way to collect it.
+    pub fn buffers(&self) -> impl Iterator<Item = BufferId> {
+        self.state.buffers.keys()
+    }
+
     /// A 1x1 buffer of the given colour, meant to be scaled to a surface's size
     /// by [`Surface::commit`].
     ///
     /// ```no_run
     /// use aufhebung::color::Color;
     ///
-    /// # fn demo(display: &aufhebung::display::Display) {
+    /// # fn demo(display: &mut aufhebung::display::Display) {
     /// let dark = display.add_color(Color::rgb(0x18, 0x1a, 0x22));
     /// let red = display.add_color(Color::hex(0xff_0000));
     /// # }
     /// ```
-    pub fn add_color(&self, color: Color) -> WlBuffer {
+    ///
+    /// The buffer is 1x1, which is what makes
+    /// [`commit`](Self::commit) the right way to place it: a single pixel
+    /// scaled to fill a surface.
+    pub fn add_color(&mut self, color: Color) -> BufferId {
         let (r, g, b, a) = color.channels();
-        self.state
+        let proxy = self
+            .state
             .globals
             .spbm
-            .create_u32_rgba_buffer(r, g, b, a, &self.qh, NoopIgnore)
+            .create_u32_rgba_buffer(r, g, b, a, &self.qh, NoopIgnore);
+        // 1x1 rather than 0x0: a colour buffer is one pixel by construction, and
+        // `commit_unscaled` on one of these would place a single pixel at the
+        // top-left corner.
+        self.insert_buffer(proxy, 1, 1)
+    }
+
+    /// Records a buffer against a fresh id and returns it.
+    ///
+    /// Every buffer in this library is created here, so this is the one place
+    /// that hands out a [`BufferId`].
+    fn insert_buffer(&mut self, proxy: WlBuffer, width: i32, height: i32) -> BufferId {
+        // `insert_with_key` so the buffer is built holding the id it is about to
+        // be filed under, rather than a placeholder that has to be patched.
+        self.state
+            .buffers
+            .insert_with_key(|id| Buffer::new(id, proxy, width, height))
     }
 
     /// A buffer holding real pixels, for an image rather than a flat colour.
@@ -211,7 +253,7 @@ impl Display {
     /// ```no_run
     /// use aufhebung::display::Display;
     ///
-    /// # fn demo(display: &Display) {
+    /// # fn demo(display: &mut Display) {
     /// // A 2x2 image: opaque red, opaque green, opaque blue, opaque white.
     /// let pixels = [0xffff_0000, 0xff00_ff00, 0xff00_00ff, 0xffff_ffff];
     /// let Some(buffer) = display.add_pixels(2, 2, &pixels) else {
@@ -240,7 +282,7 @@ impl Display {
     /// than the protocol's own limit. Each of those is a mistake that would
     /// otherwise end the connection rather than the call. A `pixels` slice longer
     /// than needed is fine, and the tail is ignored.
-    pub fn add_pixels(&self, width: i32, height: i32, pixels: &[u32]) -> Option<WlBuffer> {
+    pub fn add_pixels(&mut self, width: i32, height: i32, pixels: &[u32]) -> Option<BufferId> {
         // Every one of these is checked before anything is allocated or sent,
         // because the failure each describes is a protocol error rather than a
         // refused request.
@@ -293,7 +335,10 @@ impl Display {
             .create_pool(file.as_fd(), size, &self.qh, NoopIgnore);
         drop(file);
 
-        Some(pool.create_buffer(
+        // The size is recorded, so `commit_unscaled` can use it without being
+        // told. Every check above has already passed by this point, so `width`
+        // and `height` are the same positive values the copy used.
+        let proxy = pool.create_buffer(
             0,
             width,
             height,
@@ -301,7 +346,8 @@ impl Display {
             Format::Argb8888,
             &self.qh,
             NoopIgnore,
-        ))
+        );
+        Some(self.insert_buffer(proxy, width, height))
     }
 
     pub fn dispatch(&mut self) -> Result<usize, DispatchError> {
@@ -333,35 +379,34 @@ impl Display {
     /// Commit a buffer to a surface by id, scaled to the surface's current size.
     ///
     /// Shorthand for looking the surface up and committing, which most mutation
-    /// is. Returns `false` if the id is no longer live, having changed nothing.
+    /// is. Returns `false` if either id is not one this connection created,
+    /// having changed nothing.
     ///
     /// Committing to a toplevel before the compositor has configured it is a
     /// protocol error, not a failed commit; see
     /// [`is_configured`](Self::is_configured).
-    pub fn commit(&self, id: SurfaceId, buffer: &WlBuffer) -> bool {
-        self.surface(id).is_some_and(|surface| {
-            surface.commit(buffer);
-            true
-        })
+    pub fn commit(&self, id: SurfaceId, buffer: BufferId) -> bool {
+        let (Some(surface), Some(buffer)) = (self.surface(id), self.buffer(buffer)) else {
+            return false;
+        };
+        surface.commit(buffer);
+        true
     }
 
     /// [`Surface::commit_unscaled`](crate::surface::Surface::commit_unscaled) by
-    /// id: attach `buffer` at its own `width` x `height` and damage only that.
+    /// id: attach `buffer` at its own size and damage only that much.
     ///
     /// This is how a buffer from [`add_pixels`](Self::add_pixels) is placed
     /// without being stretched, which is what leaves a colour behind it visible.
-    /// Returns `false` if the id is no longer live, having changed nothing.
-    pub fn commit_unscaled(
-        &self,
-        id: SurfaceId,
-        buffer: &WlBuffer,
-        width: i32,
-        height: i32,
-    ) -> bool {
-        self.surface(id).is_some_and(|surface| {
-            surface.commit_unscaled(buffer, width, height);
-            true
-        })
+    /// The size comes from the buffer rather than from an argument, so it cannot
+    /// be wrong. Returns `false` if either id is not one this connection
+    /// created, having changed nothing.
+    pub fn commit_unscaled(&self, id: SurfaceId, buffer: BufferId) -> bool {
+        let (Some(surface), Some(buffer)) = (self.surface(id), self.buffer(buffer)) else {
+            return false;
+        };
+        surface.commit_unscaled(buffer);
+        true
     }
 
     /// Whether a buffer may be committed to this surface yet.

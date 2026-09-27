@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } = event
             {
                 println!("{id:?} configured to {width}x{height}");
-                display.commit(id, &white);
+                display.commit(id, white);
             }
         }
     }
@@ -151,18 +151,29 @@ The shape of it:
 * `add_surface` and `remove_surface` manage surfaces by `SurfaceId`.
 * `surface` and `surfaces` reach existing surfaces.
 * `commit` attaches a buffer by id — the short form of `surface(id)?.commit(…)`.
-* `commit_unscaled` is the same at the buffer's own size.
+* `commit_unscaled` is the same at the buffer's own size, read from the buffer
+  rather than passed in.
 * `is_configured`, `is_window`, and `should_close` query one surface by id.
 * `set_title` and `set_size_limits` forward to the same surface.
 * `dispatch` runs the complete blocking event loop.
 * `events` drains the events collected by the library.
 * `translate_key` and `translate_char` resolve a key through the compositor's
   keyboard map.
-* `add_color` creates a buffer containing a solid colour.
-* `add_pixels` creates a buffer containing real pixels, from a `wl_shm` pool.
-* `add_image` creates one from a decoded image, behind the `image` feature.
+* `add_color`, `add_pixels`, and `add_image` each create a `BufferId`.
+* `buffer` and `buffers` reach existing buffers, for their size.
 * `connection_fd`, `socket`, `prepare_read`, `dispatch_pending`, and `flush`
   expose the pieces needed to integrate the connection into another event loop.
+
+### `Buffer`
+
+A buffer is named by `BufferId`, not by a `wl_buffer`:
+
+* `id`, `width`, and `height` report the buffer's identity and size.
+* Nothing can be sent through a `Buffer`, and it cannot be destroyed. A
+  `wl_buffer` is a proxy, and whoever holds a proxy can destroy the object the
+  library still counts.
+* `commit` and `commit_unscaled` take a `BufferId` directly. `Surface::commit`
+  takes a `&Buffer` instead, obtained from `Display::buffer`.
 
 ### `Surface`
 
@@ -248,10 +259,12 @@ pixel to one pixel at the surface's top-left corner and damages only its own
 rectangle, so a colour committed to the surface behind it stays visible.
 See the Pixels example for both on one buffer.
 
-`commit_unscaled` takes the *buffer's* size, not the surface's.
-A source rectangle that reaches past the buffer is `out_of_buffer`, which ends
-the connection rather than drawing something wrong, so the two sizes are worth
-keeping straight.
+`commit_unscaled` uses the *buffer's* size, which the buffer carries, so there is
+no size to pass and no way to get it wrong.
+It used to be an argument, and a wrong one was not a wrong picture but a dead
+connection: a source rectangle reaching past the buffer is `out_of_buffer`.
+Since the surface's size is the likely wrong answer, the library reads the right
+one off the buffer instead of taking it on trust.
 
 Turning a decoded picture into those values is mechanical, and the `image`
 feature does it: `add_image` takes an `image::DynamicImage` and returns the same
@@ -277,19 +290,22 @@ The public API speaks types from `wayland-client`, `wayland-protocols`, `kbvm`,
 re-exported:
 
 ```rust
-use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
-use aufhebung::{kbvm, slotmap, wayland_protocols};
+use aufhebung::{kbvm, slotmap, wayland_client, wayland_protocols};
 ```
 
 `aufhebung` is then the only dependency an application needs to declare.
 
 Do not add `wayland-client` yourself. This crate depends on a pinned git
 revision, and Cargo treats a different source as a different crate, so the two
-`WlBuffer` types will not unify — declaring `wayland-client = "0.31"` produces
+types will not unify — declaring `wayland-client = "0.31"` produces
 `error[E0308]: mismatched types ... there are multiple different versions of
 crate wayland_client in the dependency graph`.
 Going through the re-export cannot have that problem, because it is the same
 crate this library already uses.
+
+Note what is *not* re-exported as a public type: `wl_buffer` no longer appears in
+the API at all. A buffer is a `BufferId`, and `Display::buffer` resolves one to
+a `Buffer` for reading its size.
 
 ### Seats
 
@@ -376,8 +392,8 @@ optional:
 aufhebung = { version = "0.1", features = ["image"] }
 ```
 
-`Display::add_image` takes a decoded `image::DynamicImage` and returns a buffer
-holding it at its own size:
+`Display::add_image` takes a decoded `image::DynamicImage` and returns a
+`BufferId` holding it at its own size:
 
 ```rust
 let file = aufhebung::image::open("photo.png")?;
@@ -386,9 +402,9 @@ let Some(buffer) = display.add_image(&file) else {
     return Ok(());
 };
 
-// The image's size, not the surface's.
-let (width, height) = (file.width() as i32, file.height() as i32);
-surface.commit_unscaled(&buffer, width, height);
+// No size argument: the buffer is placed at its own, and the upload was made at
+// the size the image was decoded at, so the two cannot disagree.
+display.commit_unscaled(surface, buffer);
 ```
 
 Decoding stays the application's, so `image::open` above is the only mention of a
@@ -504,6 +520,8 @@ own that tracks `wl_buffer.release`, which this library deliberately does not
 provide.
 `add_image` has the same property, since it is `add_pixels` with a conversion in
 front of it.
+A `BufferId` is where a release would be recorded, so nothing here has to change
+shape when that arrives.
 
 Image decoding is the application's.
 The `image` feature turns a `DynamicImage` into a buffer and knows nothing about

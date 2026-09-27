@@ -76,6 +76,7 @@ use kbvm::{GroupIndex, ModifierMask};
 use slotmap::SlotMap;
 
 use crate::{
+    buffer::{Buffer, BufferId},
     globals::Globals,
     seat::{Keyboard, Pointer, Seat, SeatId},
     surface::{Surface, SurfaceId},
@@ -220,6 +221,11 @@ pub enum Event {
 pub(crate) struct State {
     pub(crate) globals: Globals,
     pub(crate) surfaces: SlotMap<SurfaceId, Surface>,
+    /// Every buffer this library has made, and the size each was created at.
+    ///
+    /// Entries are never removed: a buffer the compositor may still be reading
+    /// cannot be forgotten, and nothing here is destroyed.
+    pub(crate) buffers: SlotMap<BufferId, Buffer>,
     pub(crate) xkb_ctx: kbvm::xkb::Context,
     pub(crate) events: VecDeque<Event>,
 }

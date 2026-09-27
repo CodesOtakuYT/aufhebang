@@ -4,7 +4,7 @@
 //! detail in it, and it wants finished `u32` values. That is a fine interface
 //! for a program that has them and a poor one for a program holding a JPEG, so
 //! the `image` feature adds [`Display::add_image`], which takes a decoded
-//! [`DynamicImage`] instead and does the conversion.
+//! `DynamicImage` instead and does the conversion.
 //!
 //! The asset is Hokusai's *Great Wave off Kanagawa*, public domain and
 //! committed alongside the examples rather than downloaded, so this runs with no
@@ -38,16 +38,13 @@ use anyhow::Result;
 use aufhebung::{
     color::Color,
     display::Display,
-    image::DynamicImage,
     state::{Event, SeatEvent, SurfaceEvent},
     surface::{SurfaceId, SurfaceInfo, SurfaceRole},
 };
 
-// Re-exported rather than depended on directly, for the same reason
-// `wayland-client` is: a second declaration of the same crate at a different
-// version gives back a different `DynamicImage`, and `add_image` would not take
-// it.
-use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
+// A `BufferId` rather than the `wl_buffer` behind it: a proxy is something the
+// holder can destroy, and this library would still be counting it.
+use aufhebung::buffer::BufferId;
 
 /// Relative to the crate root, which is where `cargo run` puts us. An example
 /// that fetched its own asset would need a network, and a demo that fails
@@ -71,23 +68,17 @@ enum Mode {
 struct Picture {
     window: SurfaceId,
     image: SurfaceId,
-    /// The decoded file, kept because the two commits below need its size and
-    /// it is the only thing that knows it.
-    ///
-    /// It is also worth holding onto for a resize: `image::imageops::resize`
-    /// makes a new `DynamicImage`, and that is the size that should then be
-    /// uploaded and committed at. The window below is sized from the image for
-    /// the same reason — there is no reason for the two to disagree.
-    file: DynamicImage,
+    /// The decoded file's size, which is the size everything is laid out from:
+    /// the sub-surface, the window, and the upload.
     image_size: (i32, i32),
     /// The upload, at the size the image was decoded at.
-    photo: WlBuffer,
+    photo: BufferId,
     /// The background the image sits on, in the native mode.
-    bg: WlBuffer,
+    bg: BufferId,
     /// Fully transparent, and what takes the sub-surface out of the way in the
     /// stretched mode. Scaled over the sub-surface it composites to nothing,
     /// which is the one thing a colour buffer is genuinely good at.
-    clear: WlBuffer,
+    clear: BufferId,
     mode: Mode,
 }
 
@@ -108,20 +99,18 @@ impl Picture {
     /// committed after it. Without that second commit the window would go on
     /// showing what it showed before.
     fn paint(&self, display: &Display) {
-        let (image_w, image_h) = self.image_size;
         match self.mode {
             Mode::Native => {
-                // The *image's* size, not the sub-surface's. They are the same
-                // here because the sub-surface was created at this size, which
-                // is not a coincidence: a sub-surface keeps the size it was
-                // created with, so the upload has to be made at the size it will
-                // stay.
-                display.commit_unscaled(self.image, &self.photo, image_w, image_h);
-                display.commit(self.window, &self.bg);
+                // No size argument: the buffer is committed at its own size, and
+                // the upload was made at the size the image was decoded at, so
+                // the two cannot disagree. Passing the sub-surface's size here
+                // used to be a protocol error rather than a wrong picture.
+                display.commit_unscaled(self.image, self.photo);
+                display.commit(self.window, self.bg);
             }
             Mode::Stretched => {
-                display.commit(self.image, &self.clear);
-                display.commit(self.window, &self.photo);
+                display.commit(self.image, self.clear);
+                display.commit(self.window, self.photo);
             }
         }
     }
@@ -199,7 +188,6 @@ fn main() -> Result<()> {
     let mut picture = Picture {
         window,
         image,
-        file,
         image_size,
         photo,
         bg: display.add_color(Color::hex(0x18_1a_22)),
@@ -273,12 +261,6 @@ fn main() -> Result<()> {
             break;
         }
     }
-
-    // The decoded file outlives the upload: it is dropped here, and not before,
-    // which is worth noticing only because the pixels it produced are still in
-    // a shared memory pool the compositor can still be reading. Those are two
-    // separate copies, and the pool's is the one that matters.
-    drop(picture.file);
 
     Ok(())
 }

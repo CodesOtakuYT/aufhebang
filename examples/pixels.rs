@@ -29,10 +29,9 @@ use aufhebung::{
     surface::{SurfaceId, SurfaceInfo, SurfaceRole},
 };
 
-// Re-exported rather than depended on directly: declaring our own
-// `wayland-client` would have to match this crate's git revision exactly, or
-// the `WlBuffer` types would not unify.
-use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
+// A `BufferId` rather than the `wl_buffer` behind it: a proxy is something the
+// holder can destroy, and this library would still be counting it.
+use aufhebung::buffer::BufferId;
 
 const WIDTH: i32 = 520;
 const HEIGHT: i32 = 380;
@@ -119,13 +118,13 @@ struct Picture {
     window: SurfaceId,
     image: SurfaceId,
     /// The upload, at the size it was uploaded at.
-    photo: WlBuffer,
+    photo: BufferId,
     /// The background the image sits on, in the native mode.
-    bg: WlBuffer,
+    bg: BufferId,
     /// Fully transparent, and what takes the sub-surface out of the way in the
     /// stretched mode. Scaled over the sub-surface it composites to nothing,
     /// which is the one thing a colour buffer is genuinely good at.
-    clear: WlBuffer,
+    clear: BufferId,
     mode: Mode,
 }
 
@@ -147,12 +146,12 @@ impl Picture {
     fn paint(&self, display: &Display) {
         match self.mode {
             Mode::Native => {
-                display.commit_unscaled(self.image, &self.photo, IMAGE_W, IMAGE_H);
-                display.commit(self.window, &self.bg);
+                display.commit_unscaled(self.image, self.photo);
+                display.commit(self.window, self.bg);
             }
             Mode::Stretched => {
-                display.commit(self.image, &self.clear);
-                display.commit(self.window, &self.photo);
+                display.commit(self.image, self.clear);
+                display.commit(self.window, self.photo);
             }
         }
     }

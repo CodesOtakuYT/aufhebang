@@ -43,7 +43,7 @@ use std::convert::Infallible;
 use slotmap::{SlotMap, new_key_type};
 use wayland_client::{
     Connection, Dispatch, NoopIgnore, Proxy, QueueHandle,
-    protocol::{wl_buffer::WlBuffer, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
+    protocol::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
 };
 use wayland_protocols::{
     wp::viewporter::client::wp_viewport::WpViewport,
@@ -54,6 +54,7 @@ use wayland_protocols::{
 };
 
 use crate::{
+    buffer::Buffer,
     globals::Globals,
     state::{Event, State, SurfaceEvent},
 };
@@ -230,7 +231,7 @@ impl Surface {
     /// down with it, so this asserts the handshake is done. Subsurfaces get no
     /// configure events, so they may be committed whenever. A single buffer may
     /// back any number of surfaces.
-    pub fn commit(&self, buffer: &WlBuffer) {
+    pub fn commit(&self, buffer: &Buffer) {
         // The cost of getting this wrong is not a rejected commit but a dead
         // connection, and nothing about the failure says which commit was at
         // fault. A timer that fires before the first configure has been
@@ -241,7 +242,7 @@ impl Surface {
             "committing a buffer to a toplevel the compositor has not configured"
         );
 
-        self.surface.attach(Some(buffer), 0, 0);
+        self.surface.attach(Some(&buffer.proxy), 0, 0);
         // Surface coordinates, so the viewport's scaling needs no accounting:
         // `set_destination` below makes the surface exactly `width` x `height`.
         self.surface.damage(0, 0, self.width, self.height);
@@ -265,13 +266,14 @@ impl Surface {
     /// The compositor clips the rest, so an image larger than the surface shows
     /// its top-left corner.
     ///
-    /// `width` and `height` are the buffer's own size, and passing anything else
-    /// is a protocol error rather than a wrong picture: the source rectangle is
-    /// checked against the buffer, and one that reaches past it raises
-    /// `out_of_buffer`, which takes the connection down with it. The surface's
-    /// own size is the likely wrong answer, so pass what was given to
-    /// [`Display::add_pixels`](crate::display::Display::add_pixels).
-    pub fn commit_unscaled(&self, buffer: &WlBuffer, width: i32, height: i32) {
+    /// The source rectangle is the buffer's own size, read from the buffer
+    /// rather than passed in. It used to be an argument, and a wrong value was a
+    /// protocol error rather than a wrong picture — the rectangle is checked
+    /// against the buffer, and one reaching past it raises `out_of_buffer` and
+    /// ends the connection. The surface's size was the likely wrong answer, and
+    /// the library already knew the right one.
+    pub fn commit_unscaled(&self, buffer: &Buffer) {
+        let (width, height) = (buffer.width(), buffer.height());
         // The same handshake as `commit`, and the same reason: a commit that
         // loses this race takes the connection down rather than failing.
         debug_assert!(
@@ -279,7 +281,7 @@ impl Surface {
             "committing a buffer to a toplevel the compositor has not configured"
         );
 
-        self.surface.attach(Some(buffer), 0, 0);
+        self.surface.attach(Some(&buffer.proxy), 0, 0);
         // Source and destination the same size, which is what makes it 1:1: the
         // source crops the buffer to the rectangle the destination is scaled
         // from, so unequal values are a crop or a stretch.
