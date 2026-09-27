@@ -12,15 +12,20 @@ use wayland_client::{
     },
 };
 
-use crate::{globals::GlobalData, mmap::Mmap, state::State, surface::SurfaceId};
+use crate::{
+    globals::GlobalData,
+    mmap::Mmap,
+    state::{Event, SeatEvent, State},
+    surface::SurfaceId,
+};
 
 pub struct Keyboard {
     keyboard: WlKeyboard,
     keymap: Option<Keymap>,
-    lookup_table: Option<LookupTable>,
+    pub(crate) lookup_table: Option<LookupTable>,
     focused_surface: Option<SurfaceId>,
-    group: GroupIndex,
-    mods: ModifierMask,
+    pub(crate) group: GroupIndex,
+    pub(crate) mods: ModifierMask,
 }
 
 new_key_type! {
@@ -96,14 +101,17 @@ impl Dispatch<WlKeyboard, State> for SeatId {
                 key,
                 state: key_state,
             } => {
-                let keyboard = state.keyboard_mut(*self);
-                for keysym in keyboard.lookup_table.as_ref().unwrap().lookup(
-                    keyboard.group,
-                    keyboard.mods,
-                    Keycode::from_evdev(key),
-                ) {
-                    println!("{keysym:#?}");
-                }
+                let keyboard = state.keyboard(*self);
+                state.events.push_back(Event::SeatEvent {
+                    id: *self,
+                    event: SeatEvent::Key {
+                        surface: keyboard.focused_surface.unwrap(),
+                        time,
+                        key,
+                        group: keyboard.group,
+                        mods: keyboard.mods,
+                    },
+                });
             }
             wayland_client::protocol::wl_keyboard::Event::Modifiers {
                 serial,

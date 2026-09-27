@@ -1,6 +1,7 @@
 use anyhow::Result;
 use aufhebung::{
     display::Display,
+    state::Event,
     surface::{SurfaceInfo, SurfaceRole},
 };
 
@@ -51,6 +52,23 @@ fn main() -> Result<()> {
     })?;
     loop {
         display.dispatch()?;
+        for event in display.events() {
+            match event {
+                Event::SurfaceEvent { id, event } => todo!(),
+                Event::SeatEvent { id, event } => match event {
+                    aufhebung::state::SeatEvent::Key {
+                        surface,
+                        time,
+                        key,
+                        group,
+                        mods,
+                    } => {
+                        let keysyms = display.translate_key(id, key);
+                        println!("{keysyms:?}");
+                    }
+                },
+            }
+        }
         let to_be_removed = display
             .surfaces()
             .filter(|&id| display.should_close(id))

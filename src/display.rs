@@ -1,3 +1,4 @@
+use kbvm::Keycode;
 use wayland_client::{
     ConnectError, Connection, DispatchError, EventQueue, NoopIgnore, QueueHandle,
     protocol::wl_buffer::WlBuffer,
@@ -5,7 +6,8 @@ use wayland_client::{
 
 use crate::{
     globals::{Globals, GlobalsError},
-    state::State,
+    seat::SeatId,
+    state::{Event, State},
     surface::{Surface, SurfaceError, SurfaceId, SurfaceInfo},
 };
 
@@ -34,6 +36,7 @@ impl Display {
             globals,
             surfaces: Default::default(),
             xkb_ctx: Default::default(),
+            events: Default::default(),
         };
         Ok(Self {
             conn,
@@ -82,5 +85,20 @@ impl Display {
 
     pub fn is_window(&self, id: SurfaceId) -> Option<bool> {
         self.surface(id).map(|s| s.is_window())
+    }
+
+    pub fn translate_key(&self, seat: SeatId, key: u32) -> Vec<kbvm::lookup::KeysymProps> {
+        let keyboard = self.state.keyboard(seat);
+        keyboard
+            .lookup_table
+            .as_ref()
+            .unwrap()
+            .lookup(keyboard.group, keyboard.mods, Keycode::from_evdev(key))
+            .into_iter()
+            .collect()
+    }
+
+    pub fn events(&mut self) -> Vec<Event> {
+        self.state.events.drain(..).collect()
     }
 }
