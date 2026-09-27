@@ -19,10 +19,10 @@
 //! # Subsurface synchronization
 //!
 //! A sub-surface created with `sync: true` — the protocol default — is
-//! *synchronized*: a change to it, be that position, buffer, or damage, is
-//! cached until the parent is committed, so every change needs a second commit
-//! on the parent to become visible. Committing only the sub-surface does
-//! nothing on screen.
+//! *synchronized*: a change to it, be it position, buffer, or damage, is cached
+//! until the parent is committed, so every change needs a second commit on the
+//! parent to become visible. Committing only the sub-surface does nothing on
+//! screen.
 //!
 //! `sync: false` is *desynchronized*: each commit applies on its own, halving
 //! the work per change at the cost of no longer being atomic with a change to
