@@ -1,5 +1,5 @@
 use anyhow::Result;
-use aufhebang::{
+use aufhebung::{
     display::Display,
     surface::{SurfaceInfo, SurfaceRole},
 };
