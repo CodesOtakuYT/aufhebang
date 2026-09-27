@@ -38,12 +38,13 @@ use kbvm::Keycode;
 use wayland_client::{
     ConnectError, Connection, DispatchError, EventQueue, NoopIgnore, QueueHandle,
     backend::{ReadEventsGuard, WaylandError},
-    protocol::wl_buffer::WlBuffer,
+    protocol::{wl_buffer::WlBuffer, wl_shm::Format},
 };
 
 use crate::{
     color::Color,
     globals::Globals,
+    mmap::Mmap,
     seat::SeatId,
     state::{Event, State},
     surface::{Surface, SurfaceId, SurfaceInfo},
@@ -189,6 +190,116 @@ impl Display {
             .create_u32_rgba_buffer(r, g, b, a, &self.qh, NoopIgnore)
     }
 
+    /// A buffer holding real pixels, for an image rather than a flat colour.
+    ///
+    /// `pixels` is `width * height` values in row-major order, each one pixel
+    /// packed as `0xAARRGGBB` in the machine's native byte order — so on a
+    /// little-endian machine the bytes in memory are B, G, R, A. Alpha is
+    /// pre-multiplied, which is the format's own requirement; [`Color`] is
+    /// *not* pre-multiplied, so a picture built out of it has to be multiplied
+    /// on the way in. Rows are packed with no padding, so the stride is
+    /// `width * 4`.
+    ///
+    /// A buffer from here is a real image, so
+    /// [`commit_unscaled`](Self::commit_unscaled) places it at its own size
+    /// rather than stretching it, the way [`commit`](Self::commit) does a colour.
+    ///
+    /// ```no_run
+    /// use aufhebung::display::Display;
+    ///
+    /// # fn demo(display: &Display) {
+    /// // A 2x2 image: opaque red, opaque green, opaque blue, opaque white.
+    /// let pixels = [0xffff_0000, 0xff00_ff00, 0xff00_00ff, 0xffff_ffff];
+    /// let Some(buffer) = display.add_pixels(2, 2, &pixels) else {
+    ///     return;
+    /// };
+    /// # }
+    /// ```
+    ///
+    /// # What this is not for
+    ///
+    /// **The pixels must not be changed once they are committed.** The
+    /// compositor may read them at any point after the commit, and says when it
+    /// has stopped with a `wl_buffer.release` event — which this library does not
+    /// watch for. Writing to a committed buffer's memory is a protocol violation
+    /// whose effect is undefined surface contents, and it tends to show up as
+    /// occasional garbage rather than as a clean failure.
+    ///
+    /// Each call also creates a fresh pool and buffer that live until the
+    /// connection closes, since nothing here is ever destroyed. So this is for
+    /// uploading an image once and committing it as often as you like, not for
+    /// a frame loop: a redraw that needs new pixels wants a different design.
+    ///
+    /// `None` means the image cannot be made into a buffer at all, which is
+    /// worth reporting rather than working around: a non-positive `width` or
+    /// `height`, fewer than `width * height` values in `pixels`, or a pool larger
+    /// than the protocol's own limit. Each of those is a mistake that would
+    /// otherwise end the connection rather than the call. A `pixels` slice longer
+    /// than needed is fine, and the tail is ignored.
+    pub fn add_pixels(&self, width: i32, height: i32, pixels: &[u32]) -> Option<WlBuffer> {
+        // Every one of these is checked before anything is allocated or sent,
+        // because the failure each describes is a protocol error rather than a
+        // refused request.
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let count = (width as usize).checked_mul(height as usize)?;
+        if pixels.len() < count {
+            return None;
+        }
+
+        let bytes = count.checked_mul(4)?;
+        // The pool's size is an `i32` on the wire, and a pool that cannot be
+        // described is a pool that cannot be created.
+        let Ok(size) = i32::try_from(bytes) else {
+            return None;
+        };
+
+        // A memory file rather than one on disk. The compositor gets its own
+        // descriptor when the request below is queued, so this one is closed
+        // again immediately afterwards.
+        let Ok(file) = rustix::fs::memfd_create(c"aufhebung", rustix::fs::MemfdFlags::CLOEXEC)
+        else {
+            return None;
+        };
+        // Given a size before it is mapped rather than left to be grown by
+        // writing: the compositor maps the same file when the request arrives,
+        // and a zero-length file has nothing to map.
+        if rustix::fs::ftruncate(&file, bytes as u64).is_err() {
+            return None;
+        }
+
+        let Ok(mut map) = Mmap::writable_shared(file.as_fd(), bytes) else {
+            return None;
+        };
+        // The same `count * 4` bytes on both sides: the caller's pixels, and the
+        // mapping. Both lengths were checked above and a `u32` has no padding,
+        // so this is a copy of exactly the bytes the format wants, in the
+        // machine's own order.
+        let src = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), bytes) };
+        map.as_mut_slice()[..bytes].copy_from_slice(src);
+        // Unmapped before the request goes out: nothing reads the mapping again,
+        // and keeping it would hold the file for nothing.
+        drop(map);
+
+        let pool = self
+            .state
+            .globals
+            .shm
+            .create_pool(file.as_fd(), size, &self.qh, NoopIgnore);
+        drop(file);
+
+        Some(pool.create_buffer(
+            0,
+            width,
+            height,
+            width * 4,
+            Format::Argb8888,
+            &self.qh,
+            NoopIgnore,
+        ))
+    }
+
     pub fn dispatch(&mut self) -> Result<usize, DispatchError> {
         self.event_queue.blocking_dispatch(&mut self.state)
     }
@@ -226,6 +337,25 @@ impl Display {
     pub fn commit(&self, id: SurfaceId, buffer: &WlBuffer) -> bool {
         self.surface(id).is_some_and(|surface| {
             surface.commit(buffer);
+            true
+        })
+    }
+
+    /// [`Surface::commit_unscaled`](crate::surface::Surface::commit_unscaled) by
+    /// id: attach `buffer` at its own `width` x `height` and damage only that.
+    ///
+    /// This is how a buffer from [`add_pixels`](Self::add_pixels) is placed
+    /// without being stretched, which is what leaves a colour behind it visible.
+    /// Returns `false` if the id is no longer live, having changed nothing.
+    pub fn commit_unscaled(
+        &self,
+        id: SurfaceId,
+        buffer: &WlBuffer,
+        width: i32,
+        height: i32,
+    ) -> bool {
+        self.surface(id).is_some_and(|surface| {
+            surface.commit_unscaled(buffer, width, height);
             true
         })
     }

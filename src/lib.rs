@@ -2,16 +2,16 @@
 //!
 //! `aufhebung` handles the Wayland bookkeeping that sits between an application
 //! and `wl_surface`: surface roles, xdg-shell configure handshakes, toplevel
-//! metadata, keyboard and pointer input, and event collection. Buffers, timing,
-//! scheduling, and runtime integration remain in the application.
+//! metadata, keyboard and pointer input, and event collection. What to draw,
+//! timing, scheduling, and runtime integration remain in the application.
 //!
 //! It does not own your event loop. The core API is synchronous and blocking,
 //! and the connection's socket is exposed directly, so it can be integrated
 //! into any event loop or runtime.
 //!
 //! > **Early software.** The API is unstable.
-//! > The library currently focuses on windows, sub-surfaces, buffers, and
-//! > keyboard and pointer input.
+//! > The library currently focuses on windows, sub-surfaces, colour and pixel
+//! > buffers, and keyboard and pointer input.
 //!
 //! # A smallest application
 //!
@@ -62,6 +62,24 @@
 //! [`Display::is_configured`](display::Display::is_configured) reports it, and
 //! [`is_configured`](surface::Surface::is_configured) asks the same of one
 //! surface.
+//!
+//! # Pixels
+//!
+//! [`add_color`](display::Display::add_color) makes a single pixel that the
+//! compositor scales to fill a surface, which is the right shape for a flat
+//! colour and the only thing that can be drawn with one.
+//! [`add_pixels`](display::Display::add_pixels) makes a real image instead —
+//! `width * height` `u32` values, row-major, each `0xAARRGGBB` in the machine's
+//! own byte order, uploaded through a `wl_shm` pool — and
+//! [`commit_unscaled`](surface::Surface::commit_unscaled) places it one pixel to
+//! one pixel instead of stretching it.
+//!
+//! That is an upload, not a canvas. The compositor may still be reading a
+//! committed buffer's pixels, and this library does not watch for the
+//! `wl_buffer.release` that says it has stopped, so the memory must not be
+//! written again; each upload also leaves a pool and buffer alive until the
+//! connection closes. An application that redraws by uploading new pixels needs
+//! a pool of its own that tracks releases, which this library does not provide.
 //!
 //! # Modules
 //!

@@ -2,7 +2,10 @@ use slotmap::SlotMap;
 use wayland_client::{
     Connection, Dispatch, NoopIgnore, Proxy, QueueHandle,
     globals::{BindError, Global, GlobalError, GlobalList, GlobalListHandler},
-    protocol::{wl_compositor::WlCompositor, wl_seat::WlSeat, wl_subcompositor::WlSubcompositor},
+    protocol::{
+        wl_compositor::WlCompositor, wl_seat::WlSeat, wl_shm::WlShm,
+        wl_subcompositor::WlSubcompositor,
+    },
 };
 use wayland_protocols::{
     wp::{
@@ -28,6 +31,14 @@ pub(crate) struct Globals {
     pub(crate) compositor: WlCompositor,
     pub(crate) viewporter: WpViewporter,
     pub(crate) spbm: WpSinglePixelBufferManagerV1,
+
+    /// Where the pixels of a real image come from.
+    ///
+    /// Bound at version 1, so [`release`](WlShm::release) — a version 2 request —
+    /// is not available. Nothing here needs it: the pool outlives the request
+    /// that created it on the compositor's side, and the connection going away
+    /// is what ends both.
+    pub(crate) shm: WlShm,
 
     /// `None` on a compositor with no sub-surfaces. Only
     /// [`SurfaceRole::Subsurface`](crate::surface::SurfaceRole::Subsurface)
@@ -64,6 +75,11 @@ impl Globals {
             qh,
             NoopIgnore,
         )?;
+        // A core protocol, so a compositor without it is not one this library can
+        // talk to. The `format` events it sends are not collected: every
+        // compositor has to support `argb8888`, which is the only format
+        // `add_pixels` asks for, so there is nothing to negotiate.
+        let shm = global_list.bind_singleton::<WlShm, _, _>(1..=1, qh, NoopIgnore)?;
 
         let wm_base = global_list.bind_singleton::<XdgWmBase, _, _>(1..=1, qh, GlobalData)?;
 
@@ -92,6 +108,7 @@ impl Globals {
             compositor,
             viewporter,
             spbm,
+            shm,
             subcompositor,
             wm_base,
             deco_mgr,

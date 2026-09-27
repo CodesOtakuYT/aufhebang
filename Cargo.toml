@@ -11,7 +11,9 @@ tokio = ["dep:tokio"]
 
 [dependencies]
 kbvm = "0.2.0"
-rustix = { version = "1.1.5", features = ["mm"] }
+# `mm` for mapping the keymap and the shm pools, `fs` for `memfd_create` and
+# `ftruncate` on the pool backing store. Neither pulls in another crate.
+rustix = { version = "1.1.5", features = ["fs", "mm"] }
 slotmap = "1.1.1"
 thiserror = "2.0.21"
 # Only for the `tokio` feature, which needs just `net` for `AsyncFd`.

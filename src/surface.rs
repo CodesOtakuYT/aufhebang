@@ -245,7 +245,51 @@ impl Surface {
         // Surface coordinates, so the viewport's scaling needs no accounting:
         // `set_destination` below makes the surface exactly `width` x `height`.
         self.surface.damage(0, 0, self.width, self.height);
+        // The source is unset rather than left alone, because this and
+        // `commit_unscaled` share one viewport and a source rectangle left over
+        // from the latter would crop this buffer to another one's size. All four
+        // -1.0 is how the protocol says "the whole buffer".
+        self.viewport.set_source(-1.0, -1.0, -1.0, -1.0);
         self.viewport.set_destination(self.width, self.height);
+        self.surface.commit();
+    }
+
+    /// Attaches `buffer` at its own size, damages only that much of the surface,
+    /// and commits.
+    ///
+    /// Where [`commit`](Self::commit) stretches whatever it is given to fill the
+    /// surface — which is the only thing that can be said about a 1x1 buffer, and
+    /// the right thing for a colour — this maps a real image one pixel to one
+    /// pixel at the surface's top-left corner. What is outside the buffer keeps
+    /// whatever the surface showed before, so a colour behind it stays visible.
+    /// The compositor clips the rest, so an image larger than the surface shows
+    /// its top-left corner.
+    ///
+    /// `width` and `height` are the buffer's own size, and passing anything else
+    /// is a protocol error rather than a wrong picture: the source rectangle is
+    /// checked against the buffer, and one that reaches past it raises
+    /// `out_of_buffer`, which takes the connection down with it. The surface's
+    /// own size is the likely wrong answer, so pass what was given to
+    /// [`Display::add_pixels`](crate::display::Display::add_pixels).
+    pub fn commit_unscaled(&self, buffer: &WlBuffer, width: i32, height: i32) {
+        // The same handshake as `commit`, and the same reason: a commit that
+        // loses this race takes the connection down rather than failing.
+        debug_assert!(
+            self.is_configured(),
+            "committing a buffer to a toplevel the compositor has not configured"
+        );
+
+        self.surface.attach(Some(buffer), 0, 0);
+        // Source and destination the same size, which is what makes it 1:1: the
+        // source crops the buffer to the rectangle the destination is scaled
+        // from, so unequal values are a crop or a stretch.
+        self.viewport
+            .set_source(0.0, 0.0, width as f64, height as f64);
+        self.viewport.set_destination(width, height);
+        // Only the image's own rectangle. The surface is not the same size as the
+        // buffer, so damaging all of it would ask the compositor to repaint
+        // pixels this commit does not supply.
+        self.surface.damage(0, 0, width, height);
         self.surface.commit();
     }
 

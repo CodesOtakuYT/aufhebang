@@ -6,14 +6,14 @@ A small, low-level windowing library for native Wayland applications.
 `wl_surface`: surface roles, xdg-shell configure handshakes, toplevel metadata,
 keyboard and pointer input, and event collection.
 It does **not** own your event loop.
-Buffers, timing, scheduling, and runtime integration remain in the application.
+What to draw, timing, scheduling, and runtime integration remain in the application.
 The core API is synchronous and blocking; the underlying Wayland socket is also
 available directly, so an application can integrate it with any event loop or
 runtime it wants.
 
 > **Early software.** The API is unstable.
-> The library currently focuses on windows, sub-surfaces, buffers, and keyboard
-> and pointer input.
+> The library currently focuses on windows, sub-surfaces, colour and pixel
+> buffers, and keyboard and pointer input.
 
 ## Examples
 
@@ -50,6 +50,25 @@ Both are recognised by the id on the `PointerEvent::Button`, with no geometry to
 work out and no position conversion to do — a sub-surface reports the surface it
 was hit on. The cookie darkens with every oven bought and lightens under the
 pointer, and the title carries the score.
+
+Press `q` to quit.
+
+```sh
+cargo run --example pixels
+```
+
+The Pixels example is about buffers rather than input: `Display::add_pixels`
+uploads real pixels through a `wl_shm` pool, which is the only way this library
+draws anything with detail in it.
+Its image is generated rather than decoded, so it needs no image file and no
+decoder — turning a PNG into `u32` values is the application's business, and
+`add_pixels` takes the finished values.
+The image sits on a sub-surface over a flat background, one pixel to one pixel,
+with `commit_unscaled`; press `2` to put the same buffer on the window instead,
+where `commit` stretches it to fill.
+A colour is one pixel wide by design, so stretching is exactly right for one and
+visibly wrong for a picture, which is why the example makes the difference
+pressable.
 
 Press `q` to quit.
 
@@ -114,6 +133,7 @@ The shape of it:
 * `add_surface` and `remove_surface` manage surfaces by `SurfaceId`.
 * `surface` and `surfaces` reach existing surfaces.
 * `commit` attaches a buffer by id — the short form of `surface(id)?.commit(…)`.
+* `commit_unscaled` is the same at the buffer's own size.
 * `is_configured`, `is_window`, and `should_close` query one surface by id.
 * `set_title` and `set_size_limits` forward to the same surface.
 * `dispatch` runs the complete blocking event loop.
@@ -121,6 +141,7 @@ The shape of it:
 * `translate_key` and `translate_char` resolve a key through the compositor's
   keyboard map.
 * `add_color` creates a buffer containing a solid colour.
+* `add_pixels` creates a buffer containing real pixels, from a `wl_shm` pool.
 * `connection_fd`, `socket`, `prepare_read`, `dispatch_pending`, and `flush`
   expose the pieces needed to integrate the connection into another event loop.
 
@@ -128,6 +149,8 @@ The shape of it:
 
 * `commit` attaches a buffer, fills the surface with it, and damages the full
   surface.
+* `commit_unscaled` attaches a buffer at its own size and damages only that
+  rectangle, leaving the rest of the surface alone.
 * `set_position` moves a sub-surface.
 * `set_size_limits` constrains a toplevel's requested size.
 * `is_configured` reports whether a toplevel has completed its initial
@@ -175,6 +198,47 @@ A bare `wl_surface`.
 `Color` is an RGBA colour with 8 bits per channel, with conversions from the
 usual literals.
 `Display::add_color` turns one into a buffer that can be committed to a surface.
+
+### Pixels
+
+`add_color` makes a 1×1 buffer that the compositor scales to fill a surface, which
+is all the library could draw until `add_pixels` existed.
+`add_pixels` makes a real image: `width * height` `u32` values in row-major order,
+uploaded through a `wl_shm` pool.
+
+The packing is the protocol's own, so a decoder's output can go straight in:
+
+* each pixel is `0xAARRGGBB` in the machine's native byte order, so the bytes in
+  memory are B, G, R, A on a little-endian machine;
+* alpha is pre-multiplied, which is what the format requires — note that `Color`
+  is *not* pre-multiplied, so a picture built out of it has to be multiplied on
+  the way in;
+* rows are packed with no padding, so the stride is `width * 4`.
+
+`None` means the image cannot be made into a buffer at all: a non-positive
+`width` or `height`, fewer than `width * height` values, or a pool too large for
+the protocol's own limit.
+Each of those is a mistake that would otherwise end the connection rather than
+the call, so they are refused rather than truncated.
+A longer slice is fine and the tail is ignored.
+
+Placing an image is a choice of commit.
+`commit` stretches whatever it is given to fill the surface, which is exactly
+right for a colour and wrong for a picture; `commit_unscaled` maps the buffer one
+pixel to one pixel at the surface's top-left corner and damages only its own
+rectangle, so a colour committed to the surface behind it stays visible.
+See the Pixels example for both on one buffer.
+
+**The pixels must not be written again once they are committed.**
+The compositor may read them at any point after the commit, and says when it has
+stopped with a `wl_buffer.release` event, which this library does not watch for.
+Writing to a committed buffer's memory is a protocol violation whose effect is
+undefined surface contents, and it tends to show up as occasional garbage rather
+than as a clean failure.
+Each `add_pixels` also creates a pool and buffer that live until the connection
+closes, since nothing here is ever destroyed, so this is for uploading an image
+once and committing it as often as you like — not for a frame loop.
+A redraw that needs new pixels wants a different design, and a small one.
 
 ### Re-exports
 
@@ -284,6 +348,7 @@ Wayland-native layer.
 | Platforms               | Windows, macOS, Linux, Android, iOS, web | Wayland                           |
 | Window abstraction      | `Window`, `ApplicationHandler`           | `wl_surface`, roles, configs      |
 | Pointer input           | Yes                                      | Buttons, motion, scroll           |
+| Buffer contents         | Yes                                      | Colours, one-shot pixel uploads   |
 | Text input              | Yes                                      | No                                |
 | Clipboard               | Yes                                      | No                                |
 | Monitor/output handling | Yes                                      | No                                |
@@ -348,6 +413,13 @@ A sub-surface's size is fixed when it is created — only a toplevel is ever
 configured again — so there is no way to resize one, and no way to resize a
 window directly either; a client asks the compositor to resize through
 `set_size_limits` and a `Configure` reports the result.
+
+Pixel buffers are one-shot uploads.
+`add_pixels` makes a pool and a buffer that are never destroyed and whose memory
+must not be written again after the commit, so an application that redraws by
+uploading new pixels has nothing here to draw with; it needs a buffer pool of its
+own that tracks `wl_buffer.release`, which this library deliberately does not
+provide.
 
 The seat is bound at version 1, so pointer events above that version
 (`frame`, `axis_source`, `axis_stop`, `axis_discrete`, and later additions) are
