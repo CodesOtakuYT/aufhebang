@@ -1,3 +1,20 @@
+//! The events drained from the connection.
+//!
+//! Surface and seat events are pushed into a queue as the compositor's events
+//! are handled, and are taken out by
+//! [`Display::events`](crate::display::Display::events), which drains everything
+//! queued since the last call.
+//!
+//! # Finding a seat
+//!
+//! [`Display::translate_char`](crate::display::Display::translate_char) and
+//! [`translate_key`](crate::display::Display::translate_key) need a
+//! [`SeatId`], and there is no way to ask the connection for one. Seat ids only
+//! arrive as the `id` of a [`SeatEvent`], so in practice a seat becomes usable
+//! when it first reports input.
+//!
+//! TODO: a `Display::seats()` accessor would remove that ordering requirement.
+
 use std::collections::VecDeque;
 
 use kbvm::{GroupIndex, ModifierMask};
@@ -24,17 +41,16 @@ pub enum SeatEvent {
         surface: SurfaceId,
         time: u32,
         key: u32,
-        /// `true` for a press, `false` for a release. The compositor does not
-        /// send auto-repeat key events; use `wl_keyboard.repeat_info` to
-        /// implement repeating in the consumer.
+        /// `true` for a press, `false` for a release. The compositor never
+        /// sends auto-repeat key events; use
+        /// [`RepeatInfo`](Self::RepeatInfo) to implement repeating.
         pressed: bool,
         group: GroupIndex,
         mods: ModifierMask,
     },
     /// The compositor's key repeat configuration, sent when it changes.
     ///
-    /// The compositor never sends auto-repeat key events, so the consumer
-    /// implements repeating from this: on a press, wait `delay` milliseconds,
+    /// Implement repeating from this: on a press, wait `delay` milliseconds,
     /// then emit a press every `1000 / rate` milliseconds until the key is
     /// released or `rate` becomes 0.
     RepeatInfo { rate: i32, delay: i32 },

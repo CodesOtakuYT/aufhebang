@@ -1,3 +1,10 @@
+//! Keyboards, and the keymap translation the compositor's input goes through.
+//!
+//! A [`Seat`] is only reachable through the [`SeatId`] that its
+//! [`SeatEvent`]s carry, and its keyboard only exists
+//! once the compositor has advertised one. See
+//! [the `state` module docs](crate::state#finding-a-seat).
+
 use std::os::fd::AsFd;
 
 use kbvm::{

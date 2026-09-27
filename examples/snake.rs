@@ -1,24 +1,22 @@
 //! Snake, drawn with one subsurface per tile.
 //!
 //! Only tiles that exist get surfaces: the snake and the food. During normal
-//! play, surfaces are reused rather than recreated. A normal step moves the
-//! tail surface to the new head position, so the number of surfaces stays equal
-//! to the snake's length.
+//! play, surfaces are reused rather than recreated — a step moves the tail
+//! surface to the new head position, so the number of surfaces stays equal to
+//! the snake's length.
 //!
 //! The board is a torus. Leaving one edge enters through the opposite edge, so
 //! `Pos::step` wraps with `rem_euclid`. Running into the snake is the only way
 //! to lose.
 //!
-//! Game movement is timer-driven. `Display::recv` waits on the compositor
-//! socket, so a blocking event loop cannot advance the game while no input is
-//! arriving. The library deliberately provides neither a timer nor a runtime;
-//! the application owns the event loop and uses `tokio::select!` to wait for
+//! Movement is timer-driven, because waiting on the compositor socket alone
+//! cannot advance the game while no input is arriving. The library provides
+//! neither a timer nor a runtime, so the loop uses `tokio::select!` to wait for
 //! either compositor events or the next movement tick.
 //!
-//! After a crash the board is held still while the title flashes. Once the
-//! flash ends, the game waits for a key before starting a new round. Pausing
-//! uses the same state-machine path: the board remains still and the title
-//! blinks until the pause key is pressed again.
+//! After a crash the board is held still while the title flashes, then waits for
+//! a key before starting a new round. Pausing uses the same state-machine path:
+//! the board stays still and the title blinks until the pause key again.
 
 use std::time::{Duration, Instant};
 
@@ -420,7 +418,7 @@ async fn main() -> Result<()> {
         })
         .expect("surface id space exhausted");
 
-    // The board is fixed-size, so resizing would require rebuilding the tile
+    // The board is fixed-size, so resizing would mean rebuilding the tile
     // layout. The compositor may ignore these limits, so configure handling
     // below still uses the actual configured size.
     display.set_size_limits(window, Some((board, board)), Some((board, board)));
@@ -428,7 +426,7 @@ async fn main() -> Result<()> {
     let mut game = Game::new(window, bg, inks);
     let mut reactor = Reactor::new(&display)?;
 
-    // Push the creation requests before waiting. The compositor cannot send a
+    // Push the creation requests before waiting; the compositor cannot send a
     // configure event for a surface it has not received yet.
     display.flush()?;
 

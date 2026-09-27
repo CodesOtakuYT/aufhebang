@@ -1,3 +1,37 @@
+//! The compositor connection: [`Display`], the surfaces it owns, and the
+//! events collected from them.
+//!
+//! # Driving the connection yourself
+//!
+//! [`Display::dispatch`] is a complete blocking event loop in one call. An
+//! application that would rather wait on the socket alongside its own work
+//! uses the four pieces it is made of, in this order:
+//!
+//! 1. wait until the socket is readable, through [`Display::connection_fd`] or
+//!    [`Display::socket`];
+//! 2. [`Display::prepare_read`], then read through the guard it returns;
+//! 3. [`Display::dispatch_pending`] for everything that was read;
+//! 4. [`Display::flush`] to write out the requests this pass queued.
+//!
+//! The order carries two constraints that are easy to satisfy by accident.
+//!
+//! **The read has to be claimed.** The compositor can write between the
+//! readiness check and the read, so the read is announced first and the claim
+//! held until it happens; two readers interleaving lose events. A `None` guard
+//! means a read is already in flight — dispatch what has been read, then try
+//! again — and the guard must reach [`ReadEventsGuard::read`] before it is
+//! dropped, or the connection stays locked.
+//!
+//! **The flush has to come before the wait.** The compositor cannot answer a
+//! surface it has not been told about, so a window whose creation request is
+//! still buffered would wait for a configure that is never coming.
+
+#![cfg_attr(
+    feature = "tokio",
+    doc = "With the `tokio` feature, [`Reactor::recv`](crate::tokio::Reactor::recv) \
+           does all four in the right order."
+)]
+
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 use kbvm::Keycode;
@@ -15,12 +49,12 @@ use crate::{
     surface::{Surface, SurfaceId, SurfaceInfo},
 };
 
-/// A plain handle to the compositor connection's socket.
+/// An owned, copyable handle to the connection's socket.
 ///
-/// This does not borrow the [`Display`] — the descriptor is owned by the
-/// connection — but it is only meaningful while that `Display` is alive, and is
-/// closed with it. It exists for readiness APIs that want an owned value to
-/// poll, such as `tokio`'s `AsyncFd`, which cannot hold a [`BorrowedFd`].
+/// The descriptor belongs to the connection, not to the `Display`, so this does
+/// not borrow it — but it is only valid while that `Display` is alive, and is
+/// closed with it. Meant for readiness APIs that need to own what they poll,
+/// such as `tokio`'s `AsyncFd`, which cannot hold a [`BorrowedFd`].
 ///
 /// ```
 /// # use aufhebung::display::Display;
@@ -101,31 +135,11 @@ impl Display {
     }
 
     /// Remove a surface, sending the `destroy` requests for its protocol
-    /// objects: the role object, its viewport, and the `wl_surface` itself.
+    /// objects when the returned [`Surface`] is dropped.
     ///
-    /// The removed surface is returned rather than dropped here, so that its
-    /// details can still be read — `title`, say. The destroy requests are sent
-    /// when it is dropped, so bind it to `_` or let the statement end:
-    ///
-    /// ```
-    /// # use aufhebung::{
-    /// #     display::Display,
-    /// #     surface::{SurfaceInfo, SurfaceRole},
-    /// # };
-    /// # fn demo(display: &mut Display) {
-    /// let id = display
-    ///     .add_surface(SurfaceInfo {
-    ///         width: 320,
-    ///         height: 240,
-    ///         role: SurfaceRole::None,
-    ///     })
-    ///     .unwrap();
-    /// display.remove_surface(id);
-    /// # }
-    /// ```
-    ///
-    /// Returns `None` for an id that is not live. A `SurfaceId` is never
-    /// reused, so a stale one stays `None` rather than naming a later surface.
+    /// The surface is returned rather than destroyed here so its details can
+    /// still be read — `title`, say. Returns `None` for an id that is not live;
+    /// a `SurfaceId` is never reused, so a stale one names no later surface.
     ///
     /// Removing a parent does not remove its children, and does not stop the
     /// compositor from drawing the children that are still live. Remove the
@@ -175,19 +189,17 @@ impl Display {
     /// Hand this to whatever readiness API you already have — `tokio`'s
     /// `AsyncFd`, an epoll loop, `poll`, or a thread that blocks on it. The
     /// library has no runtime of its own and never reads from the socket
-    /// except through [`prepare_read`](Self::prepare_read), so the loop stays in
-    /// control of when reading happens.
+    /// except through [`prepare_read`](Self::prepare_read), so the loop stays
+    /// in control of when reading happens.
     ///
     /// The fd is valid for as long as the `Display` is, and is closed with it.
     pub fn connection_fd(&self) -> BorrowedFd<'_> {
         self.event_queue.as_fd()
     }
 
-    /// The socket as an owned, copyable handle.
-    ///
-    /// Same descriptor as [`connection_fd`](Self::connection_fd), but detached
-    /// from the `Display`'s lifetime, for readiness APIs that need to own what
-    /// they poll. Keeping the `Display` alive keeps the descriptor valid.
+    /// The same descriptor as [`connection_fd`](Self::connection_fd), but
+    /// detached from the `Display`'s lifetime, for readiness APIs that need to
+    /// own what they poll. See [`Socket`].
     pub fn socket(&self) -> Socket {
         Socket {
             fd: self.event_queue.as_fd().as_raw_fd(),
@@ -207,9 +219,8 @@ impl Display {
 
     /// Whether a buffer may be committed to this surface yet.
     ///
-    /// `false` only for a toplevel the compositor has not configured yet, where
-    /// attaching a buffer is `xdg_surface.error.unconfigured_buffer`. Use this
-    /// to guard a commit rather than tracking the first
+    /// `false` only for a toplevel the compositor has not configured yet. Use
+    /// this to guard a commit rather than tracking the first
     /// [`SurfaceEvent::Configure`](crate::state::SurfaceEvent::Configure)
     /// yourself. Returns `false` if the id is no longer live.
     pub fn is_configured(&self, id: SurfaceId) -> bool {
@@ -236,27 +247,15 @@ impl Display {
             .is_some_and(|surface| surface.set_size_limits(min, max))
     }
 
-    /// Claim the right to read from the socket.
-    ///
-    /// This is the part of a non-blocking dispatch that cannot be folded into a
-    /// single call. The compositor can write between your readiness check and
-    /// your read, so the read has to be announced first and the claim held until
-    /// it happens; otherwise two readers can interleave and lose events.
-    ///
-    /// `None` means a read is already in flight. Dispatch what has been read
-    /// with [`dispatch_pending`](Self::dispatch_pending), then try again.
-    ///
-    /// The guard must reach [`read`](ReadEventsGuard::read) before it is
-    /// dropped, or the connection stays locked.
+    /// Claim the right to read from the socket. `None` means a read is already
+    /// in flight. See [the module docs](self#driving-the-connection-yourself)
+    /// for why the claim has to be held across the read.
     pub fn prepare_read(&self) -> Option<ReadEventsGuard> {
         self.event_queue.prepare_read()
     }
 
-    /// Run the handlers for everything already read from the socket.
-    ///
-    /// Returns how many events were handled. This never touches the socket, so
-    /// anything the compositor has sent but that has not been read yet is not
-    /// seen here — that is what [`prepare_read`](Self::prepare_read) is for.
+    /// Run the handlers for everything already read from the socket, and return
+    /// how many events that was. Never touches the socket.
     pub fn dispatch_pending(&mut self) -> Result<usize, DispatchError> {
         self.event_queue.dispatch_pending(&mut self.state)
     }
@@ -264,10 +263,8 @@ impl Display {
     /// Write out the requests queued since the last flush.
     ///
     /// [`dispatch`](Self::dispatch) does this for you. An event loop that waits
-    /// on the socket has to call it itself, and it has to call it *before*
-    /// waiting: the compositor cannot answer a surface it has not been told
-    /// about, so a window whose creation request is still buffered would wait
-    /// for a configure that is never coming.
+    /// on the socket has to call it itself, and *before* waiting — see
+    /// [the module docs](self#driving-the-connection-yourself).
     pub fn flush(&self) -> Result<(), WaylandError> {
         self.event_queue.flush()
     }
@@ -295,12 +292,8 @@ impl Display {
     /// Takes the most preferred keysym from [`translate_key`](Self::translate_key)
     /// and asks kbvm for its character, falling back to a table for keys that
     /// are not characters: the cursor keys, Return, Escape, Tab, and Backspace.
-    /// That fallback is the point of this method — kbvm's `char()` returns
-    /// `None` for all of them, so an arrow key is invisible without it.
-    ///
     /// The arrows are a convention of this crate, not a character the keyboard
-    /// produced. If you would rather see the raw keysym, use
-    /// [`translate_key`](Self::translate_key).
+    /// produced; use [`translate_key`](Self::translate_key) for the raw keysym.
     pub fn translate_char(&self, seat: SeatId, key: u32) -> Option<char> {
         let props = self.translate_key(seat, key)?.into_iter().next()?;
         props.char().or_else(|| non_char_keysym(props.keysym().0))
@@ -312,14 +305,10 @@ impl Display {
     }
 }
 
-/// Keysyms that stand for a key rather than for a character.
-///
-/// kbvm's own `char()` has no entry for these, which is why matching on a
-/// keysym was previously the only way to see an arrow key at all.
+/// Keysyms that stand for a key rather than for a character, which kbvm's own
+/// `char()` has no entry for.
 fn non_char_keysym(keysym: u32) -> Option<char> {
     Some(match keysym {
-        // The cursor keys carry no character of their own. The arrows are this
-        // crate's convention for them, not something the keyboard produced.
         0xff51 => '\u{2190}',    // Left
         0xff52 => '\u{2191}',    // Up
         0xff53 => '\u{2192}',    // Right

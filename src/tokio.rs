@@ -1,25 +1,57 @@
 //! Tokio integration, behind the `tokio` feature.
 //!
-//! This is a convenience, not a requirement. [`Reactor`] owns an
-//! [`AsyncFd`] registration and folds three of the four pieces of a non-blocking
-//! dispatch into one call, but every hook it uses is public on
-//! [`Display`](crate::display::Display) with no runtime involved, so an event
-//! loop on any other executor — or a hand-written one on tokio — is a matter of
-//! the same four calls.
+//! [`Reactor`] registers the connection socket with tokio and folds the
+//! per-wakeup cycle — wait, read, dispatch, flush — into a single
+//! [`recv`](Reactor::recv) call. It is a convenience, not a dependency: every
+//! hook it uses is public on [`Display`], so any other executor, or a
+//! hand-written one on tokio, needs only the same four calls described in
+//! [the `display` module docs](crate::display#driving-the-connection-yourself).
+//!
+//! # Why `recv` is ordered the way it is
+//!
+//! Three things in the cycle are easy to get wrong by hand:
+//!
+//! - **One read per wakeup.** The compositor can write between the readiness
+//!   check and the read, so the read has to be announced with
+//!   [`Display::prepare_read`] and the claim held until it happens. Looping
+//!   "until the read returns nothing" spins forever, because `AsyncFd` reports
+//!   the socket readable for as long as the level is set and every read after
+//!   the first returns 0.
+//! - **Clearing readiness last.** An event arriving during the read sets the
+//!   level again, and clearing before reading would swallow it.
+//! - **Flushing.** The compositor cannot answer a request it has not been
+//!   sent, so a window whose creation is still buffered would wait forever for a
+//!   configure that is never coming.
+//!
+//! # Using this in a `select!`
+//!
+//! The future borrows the `Display` mutably for as long as it is awaited, so
+//! no other branch of the same `select!` may touch it. Record which branch woke
+//! and do that work after:
 //!
 //! ```no_run
 //! # use aufhebung::display::Display;
 //! # use aufhebung::tokio::Reactor;
-//! # async fn demo(display: &mut Display) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut reactor = Reactor::new(display)?;
+//! # async fn demo(display: &mut Display, reactor: &mut Reactor)
+//! #     -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut ticker = tokio::time::interval(std::time::Duration::from_millis(180));
 //! loop {
-//!     // Reads the socket once, runs the handlers, and writes our own requests
-//!     // out. Whatever else the loop does each pass, this is the part that has
-//!     // to happen.
-//!     reactor.recv(display).await?;
+//!     let from_compositor = tokio::select! {
+//!         biased;
+//!         read = reactor.recv(display) => { read?; true }
+//!         _ = ticker.tick() => false,
+//!     };
+//!     if !from_compositor {
+//!         // Safe to borrow the display again: the future is gone.
+//!         // display.step();
+//!     }
 //! }
 //! # }
 //! ```
+//!
+//! For a loop that has to await several *other* things while the display sits
+//! idle, drop the future instead and keep [`Reactor::socket`]: that borrows the
+//! `Reactor` alone, so a branch may use the display freely.
 
 use std::io;
 
@@ -57,67 +89,22 @@ impl Reactor {
         })
     }
 
-    /// Wait for the compositor, read what it sent, run the handlers, and flush.
+    /// Wait for the compositor, read what it sent, run the handlers, and flush,
+    /// returning the number of events handled.
     ///
-    /// Returns the number of events the handlers dealt with. This is the whole
-    /// per-wakeup cycle in one call, and the order within it is not something
-    /// the caller can get wrong: readiness is awaited, the socket is read
-    /// exactly once, the handlers run, and our own requests go out.
-    ///
-    /// Three things it does that are easy to get wrong by hand:
-    ///
-    /// - **One read per wakeup.** The compositor can write between the readiness
-    ///   check and the read, so the read has to be announced with
-    ///   [`prepare_read`](Display::prepare_read) and the claim held until it
-    ///   happens. Looping "until the read returns nothing" spins forever, because
-    ///   `AsyncFd` reports the socket readable for as long as the level is set and
-    ///   every read after the first returns 0.
-    /// - **Clearing readiness last.** An event arriving during the read sets the
-    ///   level again, and clearing before reading would swallow it.
-    /// - **Flushing.** The compositor cannot answer a request it has not been
-    ///   sent, so a window whose creation is still buffered would wait forever for
-    ///   a configure that is never coming. Flushing here means the loop cannot
-    ///   forget to.
-    ///
-    /// # Using this in a `select!`
-    ///
-    /// The future borrows the `Display` mutably for as long as it is awaited, so
-    /// no other branch of the same `select!` may touch the display. Record which
-    /// branch woke and do that work after:
-    ///
-    /// ```no_run
-    /// # use aufhebung::display::Display;
-    /// # use aufhebung::tokio::Reactor;
-    /// # async fn demo(display: &mut Display, reactor: &mut Reactor)
-    /// #     -> Result<(), Box<dyn std::error::Error>> {
-    /// # let mut ticker = tokio::time::interval(std::time::Duration::from_millis(180));
-    /// loop {
-    ///     let from_compositor = tokio::select! {
-    ///         biased;
-    ///         read = reactor.recv(display) => { read?; true }
-    ///         _ = ticker.tick() => false,
-    ///     };
-    ///     if !from_compositor {
-    ///         // Safe to borrow the display again: the future is gone.
-    ///         // display.step();
-    ///     }
-    /// }
-    /// # }
-    /// ```
-    ///
-    /// For a loop that has to await several *other* things while the display sits
-    /// idle, drop the future instead and keep [`socket`](Self::socket): that
-    /// borrows the `Reactor` alone, so a branch may use the display freely.
+    /// This is the whole per-wakeup cycle in one call, and the order within it
+    /// is not something the caller can get wrong. See [the module docs](self)
+    /// for what it does and why.
     pub async fn recv(&mut self, display: &mut Display) -> Result<usize, ReactorError> {
         // Readiness is awaited before anything is read. `readable` borrows only
         // the socket, so the display is untouched until the wait is over.
         let mut ready = self.socket.readable().await?;
 
-        // One read, and the claim taken and released around it. `prepare_read`
-        // returning `None` means a read is already in flight elsewhere, which
-        // cannot happen through this type alone — the only way to reach the
-        // socket is this method — so the events already in the queue are all
-        // there is to dispatch.
+        // One read, and the claim taken and released around it. A `None` here
+        // means a read is already in flight elsewhere, which cannot happen
+        // through this type alone — the only way to reach the socket is this
+        // method — so the events already in the queue are all there is to
+        // dispatch.
         let read = match display.prepare_read() {
             Some(guard) => guard.read(),
             None => Ok(0),
@@ -128,7 +115,6 @@ impl Reactor {
 
         read?;
         let events = display.dispatch_pending()?;
-        // After dispatching, since a handler may have queued requests of its own.
         display.flush()?;
         Ok(events)
     }

@@ -1,13 +1,13 @@
 //! Colour values for [`Display::add_color`](crate::display::Display::add_color).
+//!
+//! [`Color`] takes the 8-bit channel values an application actually has — from
+//! a hex literal, a design tool, a palette — and widens them on the way out.
+//! `wp_single_pixel_buffer_manager_v1` wants each channel as a percentage over
+//! the whole `u32` range, which makes passing raw values easy to get wrong:
+//! `0xff` is not white, it is a quarter of a percent of white, and nothing
+//! about the call site hints at that.
 
 /// A colour with 8 bits per channel and straight (non-pre-multiplied) alpha.
-///
-/// `wp_single_pixel_buffer_manager_v1` takes each channel as a percentage over
-/// the whole `u32` range, which makes passing raw values easy to get wrong:
-/// `0xff` is not white, it is a quarter of a percent of white, and nothing about
-/// the call site hints at that. This type takes the 8-bit values you actually
-/// have — from a hex literal, a design tool, a palette — and widens them on the
-/// way out.
 ///
 /// ```
 /// use aufhebung::color::Color;
@@ -65,12 +65,10 @@ impl Color {
         Self { a, ..self }
     }
 
-    /// The four channels in the percentage scale the protocol expects.
-    ///
-    /// Each is `0` for none of the component and `u32::MAX` for all of it. The
-    /// colour channels are pre-multiplied by alpha, which is what
-    /// `wp_single_pixel_buffer_manager_v1` asks for; for an opaque colour that
-    /// is the identity.
+    /// The four channels in the percentage scale the protocol expects, each
+    /// `0` for none of the component and `u32::MAX` for all of it. The colour
+    /// channels are pre-multiplied by alpha, which for an opaque colour is the
+    /// identity.
     pub const fn channels(self) -> (u32, u32, u32, u32) {
         (
             channel(self.r, self.a),
