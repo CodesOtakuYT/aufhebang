@@ -158,10 +158,11 @@ usual literals.
 
 ### Seats
 
-`translate_key` and `translate_char` take a `SeatId`, and there is no way to
-enumerate seats: an id arrives with that seat's first `SeatEvent`.
-A seat therefore becomes usable once it reports input, which is why the Snake
-example can steer but cannot list the seats it might steer with.
+`translate_key` and `translate_char` resolve a key through one seat's keymap and
+modifier state, so they take a `SeatId` — the `id` on the `SeatEvent` that
+carried the key.
+Translating a key and handling the event it arrived on are therefore the same
+step.
 
 ## Tokio
 

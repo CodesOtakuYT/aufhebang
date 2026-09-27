@@ -5,15 +5,26 @@
 //! [`Display::events`](crate::display::Display::events), which drains everything
 //! queued since the last call.
 //!
-//! # Finding a seat
+//! # Seats
 //!
-//! [`Display::translate_char`](crate::display::Display::translate_char) and
-//! [`translate_key`](crate::display::Display::translate_key) need a
-//! [`SeatId`], and there is no way to ask the connection for one. Seat ids only
-//! arrive as the `id` of a [`SeatEvent`], so in practice a seat becomes usable
-//! when it first reports input.
+//! [`translate_char`](crate::display::Display::translate_char) and
+//! [`translate_key`](crate::display::Display::translate_key) resolve a key
+//! through one seat's keymap and modifier state, so they take a [`SeatId`].
+//! That id is the `id` on the [`SeatEvent`] carrying the key, so translating a
+//! key and handling the event it arrived on are the same step:
 //!
-//! TODO: a `Display::seats()` accessor would remove that ordering requirement.
+//! ```no_run
+//! # use aufhebung::{display::Display, state::{Event, SeatEvent}};
+//! # fn demo(display: &mut Display) {
+//! for event in display.events() {
+//!     if let Event::SeatEvent { id: seat, event: SeatEvent::Key { key, .. } } = event {
+//!         if let Some(c) = display.translate_char(seat, key) {
+//!             println!("{c}");
+//!         }
+//!     }
+//! }
+//! # }
+//! ```
 
 use std::collections::VecDeque;
 

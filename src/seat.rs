@@ -1,9 +1,8 @@
 //! Keyboards, and the keymap translation the compositor's input goes through.
 //!
-//! A [`Seat`] is only reachable through the [`SeatId`] that its
-//! [`SeatEvent`]s carry, and its keyboard only exists
-//! once the compositor has advertised one. See
-//! [the `state` module docs](crate::state#finding-a-seat).
+//! A seat's keyboard exists only once the compositor has advertised one, and the
+//! [`SeatId`] to resolve its keys with is the one its [`SeatEvent`]s carry. See
+//! [the `state` module docs](crate::state#seats).
 
 use std::os::fd::AsFd;
 
