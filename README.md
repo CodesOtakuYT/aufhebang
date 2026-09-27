@@ -1,31 +1,51 @@
 # aufhebung
 
-A windowing library for native Wayland applications.
+A small, low-level windowing library for native Wayland applications.
 
-It handles the xdg-shell bookkeeping — the configure handshake, surface roles, toplevel
-metadata, keyboard state — and hands you events. Buffers and the event loop stay yours.
+`aufhebung` handles the Wayland bookkeeping that sits between an application and
+`wl_surface`: surface roles, xdg-shell configure handshakes, toplevel metadata,
+keyboard state, and event collection.
 
-> **Early.** The API is unstable. No pointer input, frame callbacks, text input, clipboard, or
-> `wl_output` yet.
+It does **not** own your event loop.
+
+Buffers, timing, scheduling, and runtime integration remain in the application.
+The core API is synchronous and blocking; the underlying Wayland socket is also
+available directly, so an application can integrate it with any event loop or
+runtime it wants.
+
+> **Early software.** The API is unstable. The library currently focuses on
+> windows, sub-surfaces, buffers, and keyboard input.
 
 ## Example
 
-<img src="assets/snake.png" width="300" alt="The snake example running: a near-black window holding a grid of tiles, a green snake with a paler green head, and a single red food tile" />
+![Snake example](assets/snake.png)
 
 ```sh
 cargo run --features tokio --example snake
 ```
 
-`w/a/s/d`, `h/j/k/l` or the arrow keys to steer, `q` to quit. After a crash the title flashes, then
-asks for another round — any key but `q` plays again.
+The Snake example is intentionally built from the library's low-level pieces:
 
-A game that moves by itself, on a `tokio::select!` over the Wayland socket and a timer — the
-library has no runtime dependency, the example does. Every tile is its own sub-surface, and
-each step moves the tail surface to the front instead of destroying and recreating one, so
-the number of surfaces tracks the snake's length for the whole game. Every colour is a 1×1
-`wl_buffer` that the compositor scales to fill.
+* the window is one `wl_surface`;
+* every snake segment and the food are sub-surfaces;
+* each colour is a tiny `wl_buffer` scaled to fill its surface;
+* normal movement reuses the tail surface instead of allocating a new one;
+* movement is driven by a Tokio timer;
+* compositor events and timer ticks are handled by the same `tokio::select!`.
+
+Use `w/a/s/d`, `h/j/k/l`, or the arrow keys to steer. Press `p` or Space to
+pause and `q` to quit.
+
+After a collision, the board stays still while the title flashes. Once the
+flash ends, any key starts another round.
+
+The example is also a demonstration of async integration: `aufhebung` exposes
+the Wayland connection without requiring a runtime, while the application
+decides how that socket participates in its event loop.
 
 ## Usage
+
+The smallest application can use the blocking dispatcher directly:
 
 ```rust
 use aufhebung::{
@@ -37,25 +57,29 @@ use aufhebung::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut display = Display::new()?;
+
     let white = display.add_color(Color::WHITE);
 
     let id = display
         .add_surface(SurfaceInfo {
             width: 800,
             height: 800,
-            role: SurfaceRole::Window { title: "hello".into() },
+            role: SurfaceRole::Window {
+                title: "hello".into(),
+            },
         })
         .expect("no surface id available");
 
     loop {
         display.dispatch()?;
+
         for event in display.events() {
             if let Event::SurfaceEvent {
                 event: SurfaceEvent::Configure { width, height },
                 ..
             } = event
             {
-                println!("{id:?} resized to {width}x{height}");
+                println!("{id:?} configured to {width}x{height}");
                 display.surface(id).unwrap().commit(&white);
             }
         }
@@ -63,113 +87,200 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Commit a toplevel's first buffer in response to its configure event, not before — the
-compositor has to say how big the window is first.
+A toplevel must receive its first `configure` before the application commits
+its first buffer. `aufhebung` exposes that state directly rather than hiding
+the handshake behind a window abstraction.
 
 ## API
 
-- **`Display`** — connect, and drive the connection either blocking (`dispatch`) or from any
-  readiness API (`connection_fd`, `prepare_read`, `dispatch_pending`, `flush`).
-- **`SurfaceRole`** — `Window { title }` for a toplevel, `Subsurface { parent, x, y, sync }`
-  for a positioned sub-surface, or `None` for a bare `wl_surface`.
-- **`Surface`** — `commit` attaches a buffer, scales it to the surface, and damages it in
-  full; `set_position` moves a sub-surface; `set_size_limits` constrains how far a toplevel
-  may be resized; `is_configured` reports whether a toplevel may carry a buffer yet.
-- **`Display::translate_char`** — a key as a character, including the cursor keys.
-- **`Color`** — 8 bits per channel. `add_color` turns one into a `wl_buffer` that fills a
-  surface, which is enough to draw something before you have a buffer pipeline.
-- **`translate_key`** — the compositor's keymap, resolved to keysyms.
+### `Display`
 
-No threads, no timers, no runtime dependency.
+The main entry point.
 
-## tokio
+* `new` connects to the Wayland compositor.
+* `add_surface` and `remove_surface` manage surfaces by `SurfaceId`.
+* `surface` and `surfaces` provide access to existing surfaces.
+* `dispatch` runs the complete blocking event loop.
+* `connection_fd`, `socket`, `prepare_read`, `dispatch_pending`, and `flush`
+  expose the pieces needed to integrate the connection into another event loop.
+* `events` drains events collected by the library.
+* `translate_key` resolves a key through the compositor's keyboard map.
+* `translate_char` resolves a key to a character and provides character
+  mappings for navigation keys.
+* `add_color` creates a buffer containing a solid colour.
 
-Off by default, and optional in the only sense that matters: with it off, the crate does not
-depend on tokio at all. With it on, the crate still does not *require* a runtime — every hook
-`Reactor` uses is public on `Display`.
+### `Surface`
 
-The event loop is four calls, and all four are public: `connection_fd` to get the socket,
-`prepare_read` to claim the right to read, `read` to read, then `dispatch_pending` and `flush`.
-What `Reactor` adds is the order, which is easy to get wrong in three separate ways:
+A handle to a Wayland surface.
 
-```rust,ignore
+* `commit` attaches a buffer, fills the surface with it, and damages the full
+  surface.
+* `set_position` moves a sub-surface.
+* `set_size_limits` constrains a toplevel's requested size.
+* `is_configured` reports whether a toplevel has completed its initial
+  configure handshake.
+* `title`, `set_title`, and `should_close` expose toplevel state.
+
+### `SurfaceRole`
+
+A surface can be created with one of three roles:
+
+```rust
+SurfaceRole::Window {
+    title: "hello".into(),
+}
+```
+
+A toplevel window.
+
+```rust
+SurfaceRole::Subsurface {
+    parent,
+    x,
+    y,
+    sync,
+}
+```
+
+A positioned child surface.
+
+```rust
+SurfaceRole::None
+```
+
+A bare `wl_surface`.
+
+### `Color`
+
+`Color` represents an RGBA colour with 8 bits per channel and provides
+convenient conversions from common colour literals.
+
+`Display::add_color` turns a colour into a buffer that can be committed to a
+surface.
+
+## Tokio
+
+Tokio support is optional:
+
+```toml
+[dependencies]
+aufhebung = { version = "0.1", features = ["tokio"] }
+```
+
+The `tokio` feature provides `Reactor`, which registers the Wayland connection
+socket with Tokio and combines waiting, reading, dispatching, and flushing into
+one operation:
+
+```rust
 let mut reactor = Reactor::new(&display)?;
+
 let from_compositor = tokio::select! {
     biased;
-    read = reactor.recv(&mut display) => { read?; true }
+
+    read = reactor.recv(&mut display) => {
+        read?;
+        true
+    }
+
     _ = stepper.tick() => false,
 };
 ```
 
-`recv` reads the socket once, runs the handlers, and flushes. Note that its future borrows the
-display for as long as it is awaited, so no other branch of the same `select!` may touch the
-display — hence the `from_compositor` flag and the work after. For a loop that must await other
-things while the display sits idle, `Reactor::socket` borrows the reactor alone and composes
-with anything.
+The feature is disabled by default.
+
+`Reactor` does not introduce a second abstraction around the application event
+loop. It builds on the same public `Display` operations that are available
+without Tokio.
+
+Other runtimes can integrate directly with the connection through
+`Display::connection_fd` and the lower-level read/dispatch methods.
 
 ## Why not winit?
 
-For most projects, [winit] is the right tool and you should use it. It is mature, it is
-cross-platform, and it has pointer input, text input, clipboard, and monitor enumeration —
-none of which exist here yet. This crate is not trying to beat it.
+For most applications, [winit] is the right choice. It is mature,
+cross-platform, widely used, and provides facilities that `aufhebung` does not
+attempt to provide.
+
+`aufhebung` exists for applications that specifically want a smaller,
+Wayland-native layer.
+
+|                         | winit 0.30                               | aufhebung                         |
+| ----------------------- | ---------------------------------------- | --------------------------------- |
+| Platforms               | Windows, macOS, Linux, Android, iOS, web | Wayland                           |
+| Window abstraction      | `Window`, `ApplicationHandler`           | `wl_surface`, roles, configs      |
+| Pointer input           | Yes                                      | No                                |
+| Text input              | Yes                                      | No                                |
+| Clipboard               | Yes                                      | No                                |
+| Monitor/output handling | Yes                                      | No                                |
+| Sub-surfaces            | Not directly                             | Yes                               |
+| Event loop              | Owns the application loop                | Application owns the socket       |
+| Async integration       | External integration required            | Direct socket integration         |
+| Scope                   | Cross-platform windowing                 | Wayland surface/window primitives |
+
+There are a few situations where `aufhebung` may be a better fit:
+
+**Wayland-only applications.**
+If the application does not need X11, Windows, macOS, or other platforms,
+there is no need to carry those abstractions.
+
+**Sub-surface-heavy applications.**
+Sub-surfaces are first-class objects rather than something the application has
+to reach around the window abstraction to obtain.
+
+**Application-owned event loops.**
+The library does not insist on owning the main loop. The Wayland socket can be
+one source in an existing `select!`, poller, reactor, or runtime.
+
+**A small dependency surface.**
+The Wayland protocol and keyboard handling are implemented without depending
+on the system Wayland or X11 libraries.
 
 [winit]: https://github.com/rust-windowing/winit
-[#1199]: https://github.com/rust-windowing/winit/issues/1199
-[#3506]: https://github.com/rust-windowing/winit/issues/3506
-
-| | winit 0.30 | aufhebung 0.1 |
-|---|---|---|
-| Platforms | Windows, macOS, Linux (X11 + Wayland), Android, iOS, web | Wayland only |
-| Pointer, text input, clipboard, monitors | yes | none of these |
-| Sub-surfaces | no, [open issue][#3506] | yes |
-| Maturity | widely depended on | one example |
-| System libraries | `libwayland-dev` and `pkg-config` to build, `libxkbcommon` at runtime | [none](#system-libraries) |
-| Event loop | blocking `run`, normally the main thread, no native async | you own the socket and write the `select!` |
-| Abstraction level | `Window`, `ApplicationHandler` | `wl_surface`, roles, configs, buffers |
-
-Four reasons to reach for this instead:
-
-- **You are Wayland-only** and want no X11, Windows, or macOS code in the tree.
-- **You need sub-surfaces.** winit is toplevel-only, so the usual workaround is to run
-  `wayland-client` alongside it and manage the second connection yourself. The snake example
-  is built entirely out of sub-surfaces.
-- **You want async to be the default rather than a port.** winit has no native async story —
-  it is a blocking loop you call `run` on, usually pinned to the main thread, and the
-  conventional fix is to run tokio on other threads and ferry events over a channel. That
-  integration is still an [open question upstream][#1199]. This crate has no loop to run: you
-  hold the socket, so the event loop is one branch of a `select!` and the runtime is optional.
-- **You would rather not ship system libraries.** No `libwayland` or `libxkbcommon` to install
-  on the target, and no C toolchain to cross-compile with. See
-  [System libraries](#system-libraries).
-
-If none of those four apply, winit is the better tool.
 
 ## System libraries
 
-No shared-library dependencies. No `libwayland`, no `libxkbcommon`, no `libX11`.
+The crate does not require shared Wayland, X11, or xkbcommon libraries on the
+target system.
 
-- **`wayland-client`'s `system` and `dlopen` features are off**, so it uses the pure-Rust
-  rustix backend and talks to the compositor socket directly.
-- **Keymaps go through [kbvm]**, a Rust implementation of xkbcommon, rather than libxkbcommon.
-- **No C compiler runs.** Protocol code is generated at compile time by the `wayland-scanner`
-  proc-macro. The one `cc` build-dependency in the graph belongs to `wayland-backend`'s
-  logging shim, behind a feature this crate does not enable.
+`wayland-client`'s `system` and `dlopen` features are disabled, so the
+connection uses its Rust backend and communicates with the compositor socket
+directly.
 
-Two things are still expected of the system, neither a library: the `xkeyboard-config` data
-files that kbvm compiles keymaps against, which every desktop ships and which its build script
-falls back to `/usr/share/X11/xkb` for when `pkg-config` cannot locate them; and a Wayland
-compositor to connect to.
+Keyboard maps are handled by [kbvm], a Rust implementation of the relevant
+xkb functionality, rather than by `libxkbcommon`.
+
+No external `xkeyboard-config` data files are required: the keyboard map is
+received from the compositor as part of `wl_keyboard.keymap` and compiled in
+memory.
+
+Protocol bindings are generated at compile time by the Wayland protocol
+machinery.
 
 [kbvm]: https://crates.io/crates/kbvm
 
 ## Limitations
 
-- No pointer input, frame callbacks, text input, clipboard, or `wl_output`.
-- Decoration is server-side only, and the mode the compositor settles on is not read back.
-- `translate_key` returns keysyms. `translate_char` is the convenient form, but a key that is
-  neither a character nor one of the eight it knows about is still only reachable as a keysym.
+This is deliberately a small API. Currently it does **not** provide:
+
+* pointer input;
+* text input;
+* clipboard support;
+* `wl_output` / monitor enumeration;
+* frame callbacks;
+* client-side decorations;
+* decoration mode reporting.
+
+Keyboard handling currently exposes both translated characters and raw
+keysyms. Keys that do not correspond to a character, beyond the navigation
+keys handled by `translate_char`, are available through `translate_key`.
 
 ## Requirements
 
-A Wayland compositor, and `wayland-client`. `rust-toolchain.toml` pins nightly; nothing in the
-crate requires it.
+A Wayland compositor is the only runtime requirement.
+
+The keyboard map is supplied by the compositor through the Wayland keyboard
+protocol, so `xkeyboard-config` data files are not required at runtime.
+
+The repository contains a `rust-toolchain.toml` that currently pins nightly
+for development. The crate itself does not intentionally require nightly
+language features.
