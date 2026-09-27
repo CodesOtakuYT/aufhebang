@@ -26,6 +26,7 @@ use aufhebung::{
     display::Display,
     state::{Event, SeatEvent, SurfaceEvent},
     surface::{SurfaceId, SurfaceInfo, SurfaceRole},
+    tokio::Reactor,
 };
 use rand::Rng as _;
 use tokio::time::MissedTickBehavior;
@@ -372,7 +373,7 @@ async fn main() -> Result<()> {
 
     let mut game = Game::new(window, bg, inks);
 
-    let mut socket = tokio::io::unix::AsyncFd::new(display.socket())?;
+    let mut reactor = Reactor::new(&display)?;
 
     // The creation requests are still sitting in the write buffer. Push them out
     // before waiting on anything: the compositor cannot configure a surface it
@@ -390,47 +391,35 @@ async fn main() -> Result<()> {
     );
 
     loop {
-        tokio::select! {
-            // Biased, so a keypress is always handled before the step it might
-            // have been meant to steer. Without it tokio picks a ready branch at
-            // random, and a turn could be applied after the step that consumed
-            // the tick it was meant for.
+        // `recv` borrows the display for as long as it is awaited, so no other
+        // branch here may touch it: the branches only record which one woke, and
+        // the work follows. Biased, so a keypress is always read before the step
+        // it might have been meant to steer — without it tokio picks a ready
+        // branch at random, and a turn could be applied after the step that
+        // consumed the tick it was meant for.
+        let from_compositor = tokio::select! {
             biased;
 
-            // The compositor has something to say.
-            ready = socket.readable_mut() => {
-                let mut ready = ready?;
-
-                // Exactly one read per wakeup. `read` already drains the socket
-                // until `WouldBlock`, and `prepare_read` only refuses when
-                // *another* reader holds the claim — not when the buffer is
-                // empty. Looping here to "read until nothing is left" therefore
-                // spins forever: the claim is always granted and every read
-                // after the first returns 0.
-                if let Some(guard) = display.prepare_read() {
-                    guard.read()?;
-                }
-
-                // Clear last, so nothing that arrived during the read is missed.
-                ready.clear_ready();
+            // The compositor has something to say: read it, run the handlers,
+            // and write out whatever they queued.
+            read = reactor.recv(&mut display) => {
+                read?;
+                true
             }
 
             // ...or it is time for the snake to move.
-            _ = stepper.tick() => {
-                // The first interval tick lands immediately, long before the
-                // compositor's configure arrives, and a commit before that
-                // configure is a protocol error. Ask the library rather than
-                // inferring it from a field of our own.
-                if display.is_configured(window) {
-                    game.step(&mut display);
-                }
+            _ = stepper.tick() => false,
+        };
+
+        if !from_compositor {
+            // The first interval tick lands immediately, long before the
+            // compositor's configure arrives, and a commit before that configure
+            // is a protocol error. Ask the library rather than inferring it from
+            // a field of our own.
+            if display.is_configured(window) {
+                game.step(&mut display);
             }
         }
-
-        // Reading only pulls bytes off the socket. This is what runs the
-        // handlers, and it is also what a skipped `prepare_read` asked for.
-        display.dispatch_pending()?;
-        display.flush()?;
 
         for event in display.events() {
             match event {
@@ -482,6 +471,13 @@ async fn main() -> Result<()> {
                 },
             }
         }
+
+        // Whatever this pass queued — a step's commits, the configure's first
+        // buffer, a new title — has to reach the compositor before the loop waits
+        // on it again, or the window being waited for never appears. `recv`
+        // flushes as well, but only on the branch where it ran, so this is where
+        // the rest of the pass goes out. Usually a no-op.
+        display.flush()?;
 
         if display.should_close(window) {
             break;

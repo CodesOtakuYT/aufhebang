@@ -3,11 +3,20 @@ name = "aufhebung"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Tokio integration. Off by default, and the library still depends on no
+# runtime with it on: every hook `Reactor` uses is public on `Display`, so the
+# whole event loop can be written by hand against any reactor.
+tokio = ["dep:tokio"]
+
 [dependencies]
 kbvm = "0.2.0"
 rustix = { version = "1.1.5", features = ["mm"] }
 slotmap = "1.1.1"
 thiserror = "2.0.21"
+# Only for the `tokio` feature; see [features]. `net` is all that is wanted,
+# since `AsyncFd` is the only thing used from it.
+tokio = { version = "1", optional = true, features = ["net"] }
 wayland-client = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53" }
 wayland-protocols = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53", features = [
     "client",
@@ -18,7 +27,15 @@ wayland-protocols = { git = "https://github.com/Smithay/wayland-rs.git", rev = "
 [dev-dependencies]
 anyhow = "1.0.104"
 rand = "0.9.2"
-# Examples only. The library exposes hooks for an event loop but depends on no
-# runtime, so this stays out of [dependencies] on purpose.
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+# Examples only, and only their own needs on top of the optional dependency:
+# `macros` for `#[tokio::main]`, `rt-multi-thread` for the runtime it expands
+# to, and `time` for the interval. The library needs just `net`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wayland-client = { git = "https://github.com/Smithay/wayland-rs.git", rev = "ad7d6a9b366441769990de04425ea2371e8a0e53" }
+
+# The example is the crate's only consumer of the `tokio` feature, and also its
+# only build-time check that the feature works, so it is not built without it:
+# `cargo run --features tokio --example snake`.
+[[example]]
+name = "snake"
+required-features = ["tokio"]

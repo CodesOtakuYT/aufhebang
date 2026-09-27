@@ -13,7 +13,7 @@ metadata, keyboard state — and hands you events. Buffers and the event loop st
 <img src="assets/snake.png" width="300" alt="The snake example running: a near-black window holding a grid of tiles, a green snake with a paler green head, and a single red food tile" />
 
 ```sh
-cargo run --example snake
+cargo run --features tokio --example snake
 ```
 
 `w/a/s/d` or `h/j/k/l` to steer, `q` to quit.
@@ -79,7 +79,32 @@ compositor has to say how big the window is first.
   surface, which is enough to draw something before you have a buffer pipeline.
 - **`translate_key`** — the compositor's keymap, resolved to keysyms.
 
-No threads, no timers, no runtime dependency. Tokio is a dev-dependency for the example.
+No threads, no timers, no runtime dependency.
+
+## tokio
+
+Off by default, and optional in the only sense that matters: with it off, the crate does not
+depend on tokio at all. With it on, the crate still does not *require* a runtime — every hook
+`Reactor` uses is public on `Display`.
+
+The event loop is four calls, and all four are public: `connection_fd` to get the socket,
+`prepare_read` to claim the right to read, `read` to read, then `dispatch_pending` and `flush`.
+What `Reactor` adds is the order, which is easy to get wrong in three separate ways:
+
+```rust,ignore
+let mut reactor = Reactor::new(&display)?;
+let from_compositor = tokio::select! {
+    biased;
+    read = reactor.recv(&mut display) => { read?; true }
+    _ = stepper.tick() => false,
+};
+```
+
+`recv` reads the socket once, runs the handlers, and flushes. Note that its future borrows the
+display for as long as it is awaited, so no other branch of the same `select!` may touch the
+display — hence the `from_compositor` flag and the work after. For a loop that must await other
+things while the display sits idle, `Reactor::socket` borrows the reactor alone and composes
+with anything.
 
 ## Why not winit?
 
