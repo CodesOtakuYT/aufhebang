@@ -8,8 +8,18 @@ edition = "2024"
 # `Reactor` uses is public on `Display`, so the loop can also be written by hand
 # against any reactor.
 tokio = ["dep:tokio"]
+# Image decoding, for `Display::add_image`. Off by default, because a program
+# that builds its own pixels — including every other example here — has no use
+# for a file format decoder.
+image = ["dep:image"]
 
 [dependencies]
+# Only the two formats the bundled asset and its tests need. `image`'s own
+# default feature set is fifteen codecs plus `rayon`, which works out at 120
+# packages against 20 here, and it includes a complete AV1 encoder. To decode
+# something else, depend on `image` yourself with the features you want: Cargo
+# unifies them with this one, so that needs no fork of this crate.
+image = { version = "0.25.10", optional = true, default-features = false, features = ["jpeg", "png"] }
 kbvm = "0.2.0"
 # `mm` for mapping the keymap and the shm pools, `fs` for `memfd_create` and
 # `ftruncate` on the pool backing store. Neither pulls in another crate.
@@ -38,3 +48,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 [[example]]
 name = "snake"
 required-features = ["tokio"]
+
+# Likewise the only consumer of the `image` feature.
+[[example]]
+name = "photo"
+required-features = ["image"]

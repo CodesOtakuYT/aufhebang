@@ -72,6 +72,24 @@ pressable.
 
 Press `q` to quit.
 
+```sh
+cargo run --features image --example photo
+```
+
+The Photo example is the Pixels example again, with the image loaded from a file
+instead of generated, which is the one step `add_pixels` leaves to the
+application.
+`Display::add_image` takes an already-decoded `image::DynamicImage` and does the
+conversion, so what this example adds is an `image::open` call and then the same
+two commits as before.
+
+The asset is Hokusai's *The Great Wave off Kanagawa*, public domain and committed
+alongside the examples so that the example needs no network; see
+[`assets/README.md`](assets/README.md) for where it came from.
+
+Press `1` for the image at its own size, `2` stretched over the window, and `q`
+to quit.
+
 ## Usage
 
 The smallest application can use the blocking dispatcher directly:
@@ -142,6 +160,7 @@ The shape of it:
   keyboard map.
 * `add_color` creates a buffer containing a solid colour.
 * `add_pixels` creates a buffer containing real pixels, from a `wl_shm` pool.
+* `add_image` creates one from a decoded image, behind the `image` feature.
 * `connection_fd`, `socket`, `prepare_read`, `dispatch_pending`, and `flush`
   expose the pieces needed to integrate the connection into another event loop.
 
@@ -229,6 +248,17 @@ pixel to one pixel at the surface's top-left corner and damages only its own
 rectangle, so a colour committed to the surface behind it stays visible.
 See the Pixels example for both on one buffer.
 
+`commit_unscaled` takes the *buffer's* size, not the surface's.
+A source rectangle that reaches past the buffer is `out_of_buffer`, which ends
+the connection rather than drawing something wrong, so the two sizes are worth
+keeping straight.
+
+Turning a decoded picture into those values is mechanical, and the `image`
+feature does it: `add_image` takes an `image::DynamicImage` and returns the same
+buffer `add_pixels` would.
+The one thing it has to change is the alpha, since `image` carries it straight
+and `argb8888` wants it pre-multiplied; see [Images](#images).
+
 **The pixels must not be written again once they are committed.**
 The compositor may read them at any point after the commit, and says when it has
 stopped with a `wl_buffer.release` event, which this library does not watch for.
@@ -243,7 +273,8 @@ A redraw that needs new pixels wants a different design, and a small one.
 ### Re-exports
 
 The public API speaks types from `wayland-client`, `wayland-protocols`, `kbvm`,
-and `slotmap`, so all four are re-exported:
+`slotmap`, and — behind the `image` feature — `image`, so all five are
+re-exported:
 
 ```rust
 use aufhebung::wayland_client::protocol::wl_buffer::WlBuffer;
@@ -335,6 +366,57 @@ it holds the connection open for as long as it lives — the `Display` should
 still outlive it, since everything the `Display` owns is gone once it is
 dropped.
 
+## Images
+
+Loading a picture is `add_pixels` with the conversion done for you, and it is
+optional:
+
+```toml
+[dependencies]
+aufhebung = { version = "0.1", features = ["image"] }
+```
+
+`Display::add_image` takes a decoded `image::DynamicImage` and returns a buffer
+holding it at its own size:
+
+```rust
+let file = aufhebung::image::open("photo.png")?;
+
+let Some(buffer) = display.add_image(&file) else {
+    return Ok(());
+};
+
+// The image's size, not the surface's.
+let (width, height) = (file.width() as i32, file.height() as i32);
+surface.commit_unscaled(&buffer, width, height);
+```
+
+Decoding stays the application's, so `image::open` above is the only mention of a
+file format, and a decoder of the application's own choosing would serve just as
+well.
+
+The one thing the conversion has to change is the alpha: `image` carries channels
+straight, and `argb8888` wants them pre-multiplied.
+Left straight, a translucent pixel arrives darker than intended, since the
+compositor scales it by the alpha a second time — and on an opaque image, which
+is most of them, there is nothing to see either way.
+
+The feature brings in `jpeg` and `png` and little else.
+That is a deliberate choice rather than a default left alone: `image`'s own
+default feature set is fifteen codecs plus `rayon`, which comes to 120 packages
+against 20 here, and it includes a complete AV1 encoder.
+To decode something else, depend on `image` yourself with the features you want;
+Cargo unifies them with this one, so no fork of `aufhebung` is involved:
+
+```toml
+[dependencies]
+aufhebung = { version = "0.1", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["webp"] }
+```
+
+The feature is disabled by default, so a program that builds its own pixels — as
+the Pixels example does — pays nothing for it.
+
 ## Why not winit?
 
 For most applications, [winit] is the right choice.
@@ -348,7 +430,7 @@ Wayland-native layer.
 | Platforms               | Windows, macOS, Linux, Android, iOS, web | Wayland                           |
 | Window abstraction      | `Window`, `ApplicationHandler`           | `wl_surface`, roles, configs      |
 | Pointer input           | Yes                                      | Buttons, motion, scroll           |
-| Buffer contents         | Yes                                      | Colours, one-shot pixel uploads   |
+| Buffer contents         | Yes                                      | Colours, pixel uploads, images    |
 | Text input              | Yes                                      | No                                |
 | Clipboard               | Yes                                      | No                                |
 | Monitor/output handling | Yes                                      | No                                |
@@ -420,6 +502,13 @@ must not be written again after the commit, so an application that redraws by
 uploading new pixels has nothing here to draw with; it needs a buffer pool of its
 own that tracks `wl_buffer.release`, which this library deliberately does not
 provide.
+`add_image` has the same property, since it is `add_pixels` with a conversion in
+front of it.
+
+Image decoding is the application's.
+The `image` feature turns a `DynamicImage` into a buffer and knows nothing about
+file formats beyond which two to enable, and it does no resizing: a picture drawn
+at a size other than its own has to be resized first, by the application.
 
 The seat is bound at version 1, so pointer events above that version
 (`frame`, `axis_source`, `axis_stop`, `axis_discrete`, and later additions) are

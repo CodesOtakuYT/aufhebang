@@ -74,6 +74,14 @@
 //! [`commit_unscaled`](surface::Surface::commit_unscaled) places it one pixel to
 //! one pixel instead of stretching it.
 //!
+//! Loading a file is one step beyond that, and is what the `image` feature is
+//! for: `Display::add_image` takes a `DynamicImage` instead of finished numbers
+//! and does the conversion, including the pre-multiplication that `image`
+//! deliberately does not do for you. Decoding stays the application's — the
+//! feature brings in `jpeg` and `png` and little else, and a program that wants
+//! another format depends on `image` itself with the features it needs, which
+//! Cargo unifies with this one.
+//!
 //! That is an upload, not a canvas. The compositor may still be reading a
 //! committed buffer's pixels, and this library does not watch for the
 //! `wl_buffer.release` that says it has stopped, so the memory must not be
@@ -114,9 +122,15 @@
 //! always match.
 
 #![cfg_attr(feature = "tokio", doc = "- [`tokio`] — the optional `tokio` feature.")]
+#![cfg_attr(
+    feature = "image",
+    doc = "- [`image`] — the optional `image` feature, for `Display::add_image` and the decoding in `crate::decode`."
+)]
 #![deny(unused_must_use)]
 
 pub mod color;
+#[cfg(feature = "image")]
+pub mod decode;
 pub mod display;
 pub(crate) mod globals;
 pub(crate) mod mmap;
@@ -126,6 +140,8 @@ pub mod surface;
 #[cfg(feature = "tokio")]
 pub mod tokio;
 
+#[cfg(feature = "image")]
+pub use image;
 pub use kbvm;
 pub use slotmap;
 pub use wayland_client;

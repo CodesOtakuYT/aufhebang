@@ -64,11 +64,15 @@ use crate::{
 ///
 /// ```
 /// # use aufhebung::display::Display;
+/// # #[cfg(feature = "tokio")]
 /// # fn demo(display: &Display) -> Result<(), tokio::io::Error> {
 /// let socket = tokio::io::unix::AsyncFd::new(display.socket())?;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// The example is compiled only with the `tokio` feature, since that is the one
+/// place this crate knows the crate is called for.
 #[derive(Clone, Debug)]
 pub struct Socket {
     conn: Connection,
