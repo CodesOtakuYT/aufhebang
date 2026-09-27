@@ -2,10 +2,7 @@ use slotmap::SlotMap;
 use wayland_client::{
     Connection, Dispatch, NoopIgnore, Proxy, QueueHandle,
     globals::{BindError, GlobalError, GlobalList, GlobalListHandler},
-    protocol::{
-        wl_compositor::WlCompositor, wl_keyboard::WlKeyboard, wl_seat::WlSeat,
-        wl_subcompositor::WlSubcompositor,
-    },
+    protocol::{wl_compositor::WlCompositor, wl_seat::WlSeat, wl_subcompositor::WlSubcompositor},
 };
 use wayland_protocols::{
     wp::{
@@ -67,7 +64,7 @@ impl Globals {
 
         let mut seats = SlotMap::<SeatId, Option<Seat>>::default();
 
-        for seat in global_list.bind_all::<WlSeat, _, _>(1..=1, qh, |id| seats.insert(None))? {
+        for seat in global_list.bind_all::<WlSeat, _, _>(1..=1, qh, |_| seats.insert(None))? {
             let id = seat.data::<SeatId>().unwrap();
             let slot = seats.get_mut(*id).unwrap();
             *slot = Some(Seat {
@@ -93,16 +90,15 @@ impl GlobalListHandler for State {}
 impl Dispatch<XdgWmBase, State> for GlobalData {
     fn event(
         &self,
-        state: &mut State,
+        _state: &mut State,
         proxy: &XdgWmBase,
         event: <XdgWmBase as wayland_client::Proxy>::Event,
-        conn: &Connection,
-        qh: &QueueHandle<State>,
+        _conn: &Connection,
+        _qh: &QueueHandle<State>,
     ) {
         use wayland_protocols::xdg::shell::client::xdg_wm_base::Event;
-        match event {
-            Event::Ping { serial } => proxy.pong(serial),
-            _ => {}
+        if let Event::Ping { serial } = event {
+            proxy.pong(serial);
         }
     }
 }

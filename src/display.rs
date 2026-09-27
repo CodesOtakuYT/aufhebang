@@ -8,11 +8,10 @@ use crate::{
     globals::{Globals, GlobalsError},
     seat::SeatId,
     state::{Event, State},
-    surface::{Surface, SurfaceError, SurfaceId, SurfaceInfo},
+    surface::{Surface, SurfaceId, SurfaceInfo},
 };
 
 pub struct Display {
-    conn: Connection,
     event_queue: EventQueue<State>,
     qh: QueueHandle<State>,
     state: State,
@@ -29,6 +28,8 @@ pub enum DisplayError {
 impl Display {
     pub fn new() -> Result<Self, DisplayError> {
         let conn = unsafe { Connection::connect_to_env() }?;
+        // The queue holds its own handle to the connection, so the local one can
+        // be dropped here.
         let event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
         let globals = Globals::new(&conn, &qh)?;
@@ -39,15 +40,17 @@ impl Display {
             events: Default::default(),
         };
         Ok(Self {
-            conn,
             event_queue,
             qh,
             state,
         })
     }
 
-    pub fn add_surface(&mut self, info: SurfaceInfo) -> Result<SurfaceId, SurfaceError> {
-        Surface::new(
+    /// Create a surface with the given role.
+    ///
+    /// Returns `None` if the role names a subsurface parent that is not live.
+    pub fn add_surface(&mut self, info: SurfaceInfo) -> Option<SurfaceId> {
+        Surface::insert(
             &self.state.globals,
             &mut self.state.surfaces,
             &self.qh,
@@ -72,6 +75,8 @@ impl Display {
         self.state.surfaces.keys()
     }
 
+    /// A 1x1 opaque buffer of the given colour, meant to be scaled to a
+    /// surface's size by [`Surface::commit`].
     pub fn add_color(&self, r: u32, g: u32, b: u32, a: u32) -> WlBuffer {
         self.state
             .globals
@@ -83,21 +88,25 @@ impl Display {
         self.event_queue.blocking_dispatch(&mut self.state)
     }
 
-    pub fn is_window(&self, id: SurfaceId) -> Option<bool> {
-        self.surface(id).map(|s| s.is_window())
+    pub fn is_window(&self, id: SurfaceId) -> bool {
+        self.surface(id).is_some_and(|s| s.is_window())
     }
 
-    pub fn translate_key(&self, seat: SeatId, key: u32) -> Vec<kbvm::lookup::KeysymProps> {
-        let keyboard = self.state.keyboard(seat);
-        keyboard
-            .lookup_table
-            .as_ref()
-            .unwrap()
-            .lookup(keyboard.group, keyboard.mods, Keycode::from_evdev(key))
-            .into_iter()
-            .collect()
+    /// The keysyms `key` produces on `seat`, most preferred first.
+    ///
+    /// `None` if the seat exposes no keyboard or has not sent its keymap yet.
+    pub fn translate_key(&self, seat: SeatId, key: u32) -> Option<Vec<kbvm::lookup::KeysymProps>> {
+        let keyboard = self.state.keyboard(seat)?;
+        let lookup_table = keyboard.lookup_table.as_ref()?;
+        Some(
+            lookup_table
+                .lookup(keyboard.group, keyboard.mods, Keycode::from_evdev(key))
+                .into_iter()
+                .collect(),
+        )
     }
 
+    /// Drain every event queued since the last call.
     pub fn events(&mut self) -> Vec<Event> {
         self.state.events.drain(..).collect()
     }

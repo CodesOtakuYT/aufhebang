@@ -1,6 +1,8 @@
+use std::convert::Infallible;
+
 use slotmap::{SlotMap, new_key_type};
 use wayland_client::{
-    Dispatch, NoopIgnore, QueueHandle,
+    Connection, Dispatch, NoopIgnore, Proxy, QueueHandle,
     protocol::{wl_buffer::WlBuffer, wl_subsurface::WlSubsurface, wl_surface::WlSurface},
 };
 use wayland_protocols::{
@@ -11,16 +13,32 @@ use wayland_protocols::{
     },
 };
 
-use crate::{globals::Globals, state::State};
+use crate::{
+    globals::Globals,
+    state::{Event, State, SurfaceEvent},
+};
 
 new_key_type! {
     pub struct SurfaceId;
 }
 
+/// The role to give a new surface.
 pub enum SurfaceRole {
     Window { title: String },
     Subsurface { parent: SurfaceId, x: i32, y: i32 },
     None,
+}
+
+/// Everything needed to create a surface.
+///
+/// Buffers are deliberately absent: this library owns the protocol handshake,
+/// the consumer owns the pixels. See [`Surface::commit`].
+pub struct SurfaceInfo {
+    /// Starting size. A toplevel is resized by the compositor and reports the
+    /// result through [`SurfaceEvent::Configure`].
+    pub width: i32,
+    pub height: i32,
+    pub role: SurfaceRole,
 }
 
 enum SurfaceRoleObject {
@@ -28,6 +46,7 @@ enum SurfaceRoleObject {
         xdg_surface: XdgSurface,
         toplevel: XdgToplevel,
         deco: ZxdgToplevelDecorationV1,
+        title: String,
         should_close: bool,
     },
     Subsurface {
@@ -41,105 +60,137 @@ pub struct Surface {
     viewport: WpViewport,
     width: i32,
     height: i32,
-    buffer: Option<WlBuffer>,
     role: SurfaceRoleObject,
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum SurfaceError {}
-
-pub struct SurfaceInfo {
-    pub width: i32,
-    pub height: i32,
-    pub buffer: Option<WlBuffer>,
-    pub role: SurfaceRole,
-}
-
 impl Surface {
-    #[expect(clippy::new_ret_no_self)]
-    pub fn new(
+    /// Returns `None` if the role names a subsurface parent that is not live.
+    pub(crate) fn insert(
         globals: &Globals,
         surfaces: &mut SlotMap<SurfaceId, Surface>,
         qh: &QueueHandle<State>,
         info: SurfaceInfo,
-    ) -> Result<SurfaceId, SurfaceError> {
-        let subsurface_parent = match info.role {
-            SurfaceRole::Subsurface { parent, .. } => {
-                surfaces.get(parent).map(|s| s.surface.clone())
-            }
+    ) -> Option<SurfaceId> {
+        let SurfaceInfo {
+            width,
+            height,
+            role,
+        } = info;
+
+        // Resolve the parent before creating anything, so that a dead parent
+        // rejects the request instead of panicking halfway through.
+        let parent = match &role {
+            SurfaceRole::Subsurface { parent, .. } => Some(surfaces.get(*parent)?.surface.clone()),
             _ => None,
         };
 
-        surfaces.try_insert_with_key(|id: SurfaceId| {
-            let surface = globals.compositor.create_surface(qh, id);
-            let viewport = globals.viewporter.get_viewport(&surface, qh, NoopIgnore);
+        let id = surfaces
+            .try_insert_with_key(|id: SurfaceId| {
+                let surface = globals.compositor.create_surface(qh, id);
+                let viewport = globals.viewporter.get_viewport(&surface, qh, NoopIgnore);
 
-            let role = match info.role {
-                SurfaceRole::Window { title } => {
-                    let xdg_surface = globals.wm_base.get_xdg_surface(&surface, qh, id);
-                    let toplevel = xdg_surface.get_toplevel(qh, id);
-                    toplevel.set_title(title);
-                    let deco = globals
-                        .deco_mgr
-                        .get_toplevel_decoration(&toplevel, qh, NoopIgnore);
-                    deco.set_mode(Mode::ServerSide);
-                    SurfaceRoleObject::Window {
-                        xdg_surface,
-                        toplevel,
-                        deco,
-                        should_close: false,
+                let role = match role {
+                    SurfaceRole::Window { title } => {
+                        let xdg_surface = globals.wm_base.get_xdg_surface(&surface, qh, id);
+                        let toplevel = xdg_surface.get_toplevel(qh, id);
+                        // This revision of wayland-protocols takes string
+                        // arguments by value, so keep our own copy to hand back
+                        // from `Surface::title`.
+                        toplevel.set_title(title.clone());
+                        let deco = globals
+                            .deco_mgr
+                            .get_toplevel_decoration(&toplevel, qh, NoopIgnore);
+                        deco.set_mode(Mode::ServerSide);
+                        SurfaceRoleObject::Window {
+                            xdg_surface,
+                            toplevel,
+                            deco,
+                            title,
+                            should_close: false,
+                        }
                     }
-                }
-                SurfaceRole::Subsurface { parent, x, y } => {
-                    let subsurface = globals.subcompositor.get_subsurface(
-                        &surface,
-                        &subsurface_parent.unwrap(),
-                        qh,
-                        NoopIgnore,
-                    );
-                    subsurface.set_position(x, y);
-                    viewport.set_destination(info.width, info.height);
-                    surface.attach(info.buffer.as_ref(), 0, 0);
-                    SurfaceRoleObject::Subsurface { subsurface }
-                }
-                SurfaceRole::None => SurfaceRoleObject::None,
-            };
+                    SurfaceRole::Subsurface { x, y, .. } => {
+                        let subsurface = globals.subcompositor.get_subsurface(
+                            &surface,
+                            // Resolved above, and only for this role.
+                            parent
+                                .as_ref()
+                                .expect("subsurface role always resolves a parent"),
+                            qh,
+                            NoopIgnore,
+                        );
+                        subsurface.set_position(x, y);
+                        SurfaceRoleObject::Subsurface { subsurface }
+                    }
+                    SurfaceRole::None => SurfaceRoleObject::None,
+                };
 
-            surface.commit();
+                // The initial commit carries no buffer. For a toplevel this is
+                // what makes the compositor send the first configure; for a
+                // subsurface it is simply an empty starting point. Either way
+                // the consumer supplies the contents afterwards.
+                surface.commit();
 
-            Ok::<_, SurfaceError>(Self {
-                surface,
-                role,
-                viewport,
-                buffer: info.buffer,
-                width: info.width,
-                height: info.height,
+                // A full slot map panics inside slotmap, so the error type here
+                // is never actually produced.
+                Ok::<_, Infallible>(Self {
+                    surface,
+                    role,
+                    viewport,
+                    width,
+                    height,
+                })
             })
-        })
+            .ok()?;
+
+        Some(id)
     }
 
-    pub fn should_close(&self) -> bool {
+    /// Attaches `buffer`, scales it to the current size, and commits.
+    ///
+    /// A toplevel must be committed in response to [`SurfaceEvent::Configure`],
+    /// which is emitted only after the configure has been acked. Committing one
+    /// before its first configure is a protocol error. Subsurfaces get no
+    /// configure events, so they may be committed whenever.
+    ///
+    /// A single buffer may back any number of surfaces.
+    pub fn commit(&self, buffer: &WlBuffer) {
+        self.surface.attach(Some(buffer), 0, 0);
+        self.viewport.set_destination(self.width, self.height);
+        self.surface.commit();
+    }
+
+    /// The size last set by the compositor, or the size given at creation for a
+    /// surface that has not been configured yet.
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// The title of a toplevel, or `None` for any other role.
+    pub fn title(&self) -> Option<&str> {
         match &self.role {
-            SurfaceRoleObject::Window {
-                xdg_surface,
-                toplevel,
-                deco,
-                should_close,
-            } => *should_close,
-            _ => false,
+            SurfaceRoleObject::Window { title, .. } => Some(title),
+            _ => None,
         }
     }
 
-    pub fn is_window(&self) -> bool {
+    /// Whether the compositor asked this toplevel to close.
+    pub fn should_close(&self) -> bool {
         matches!(
             &self.role,
             SurfaceRoleObject::Window {
-                xdg_surface,
-                toplevel,
-                deco,
-                should_close,
+                should_close: true,
+                ..
             }
         )
+    }
+
+    pub fn is_window(&self) -> bool {
+        matches!(&self.role, SurfaceRoleObject::Window { .. })
     }
 }
 
@@ -150,15 +201,13 @@ impl Drop for Surface {
                 xdg_surface,
                 toplevel,
                 deco,
-                should_close,
+                ..
             } => {
                 deco.destroy();
                 toplevel.destroy();
                 xdg_surface.destroy();
             }
-            SurfaceRoleObject::Subsurface { subsurface } => {
-                subsurface.destroy();
-            }
+            SurfaceRoleObject::Subsurface { subsurface } => subsurface.destroy(),
             SurfaceRoleObject::None => {}
         }
         self.viewport.destroy();
@@ -169,11 +218,11 @@ impl Drop for Surface {
 impl Dispatch<WlSurface, State> for SurfaceId {
     fn event(
         &self,
-        state: &mut State,
-        proxy: &WlSurface,
-        event: <WlSurface as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qh: &QueueHandle<State>,
+        _state: &mut State,
+        _proxy: &WlSurface,
+        _event: <WlSurface as Proxy>::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<State>,
     ) {
     }
 }
@@ -183,24 +232,29 @@ impl Dispatch<XdgSurface, State> for SurfaceId {
         &self,
         state: &mut State,
         proxy: &XdgSurface,
-        event: <XdgSurface as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qh: &QueueHandle<State>,
+        event: <XdgSurface as Proxy>::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<State>,
     ) {
-        use wayland_protocols::xdg::shell::client::xdg_surface::Event;
+        use wayland_protocols::xdg::shell::client::xdg_surface::Event as XdgSurfaceEvent;
 
-        if let Some(surface) = state.surfaces.get(*self) {
-            match event {
-                Event::Configure { serial } => {
-                    proxy.ack_configure(serial);
-                    surface.surface.attach(surface.buffer.as_ref(), 0, 0);
-                    surface
-                        .viewport
-                        .set_destination(surface.width, surface.height);
-                    surface.surface.commit();
-                }
-                _ => todo!(),
-            }
+        // `xdg_surface` defines no event other than `configure`.
+        if let XdgSurfaceEvent::Configure { serial } = event {
+            // The toplevel configure carrying the new size always precedes this
+            // one, so `width`/`height` are already latched. Ack first: the
+            // protocol requires the ack to reach the compositor before the commit
+            // that answers it, and the consumer only learns about the configure
+            // through the event pushed below.
+            proxy.ack_configure(serial);
+
+            let Some(surface) = state.surfaces.get(*self) else {
+                return;
+            };
+            let (width, height) = (surface.width, surface.height);
+            state.events.push_back(Event::SurfaceEvent {
+                id: *self,
+                event: SurfaceEvent::Configure { width, height },
+            });
         }
     }
 }
@@ -209,19 +263,18 @@ impl Dispatch<XdgToplevel, State> for SurfaceId {
     fn event(
         &self,
         state: &mut State,
-        proxy: &XdgToplevel,
-        event: <XdgToplevel as wayland_client::Proxy>::Event,
-        conn: &wayland_client::Connection,
-        qh: &QueueHandle<State>,
+        _proxy: &XdgToplevel,
+        event: <XdgToplevel as Proxy>::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<State>,
     ) {
-        use wayland_protocols::xdg::shell::client::xdg_toplevel::Event;
+        use wayland_protocols::xdg::shell::client::xdg_toplevel::Event as XdgToplevelEvent;
+
         if let Some(surface) = state.surfaces.get_mut(*self) {
             match event {
-                Event::Configure {
-                    width,
-                    height,
-                    states,
-                } => {
+                XdgToplevelEvent::Configure { width, height, .. } => {
+                    // Zero means the compositor has no opinion, so keep whatever
+                    // size we already had.
                     if width != 0 {
                         surface.width = width;
                     }
@@ -229,24 +282,17 @@ impl Dispatch<XdgToplevel, State> for SurfaceId {
                         surface.height = height;
                     }
                     match &surface.role {
-                        SurfaceRoleObject::Window {
-                            xdg_surface,
-                            toplevel,
-                            deco,
-                            should_close,
-                        } => xdg_surface.set_window_geometry(0, 0, surface.width, surface.height),
-                        _ => unreachable!(),
+                        SurfaceRoleObject::Window { xdg_surface, .. } => {
+                            xdg_surface.set_window_geometry(0, 0, surface.width, surface.height)
+                        }
+                        _ => unreachable!("an xdg_toplevel is always the window role"),
                     }
                 }
-                Event::Close => match &mut surface.role {
-                    SurfaceRoleObject::Window {
-                        xdg_surface,
-                        toplevel,
-                        deco,
-                        should_close,
-                    } => *should_close = true,
-                    _ => unreachable!(),
-                },
+                XdgToplevelEvent::Close => {
+                    if let SurfaceRoleObject::Window { should_close, .. } = &mut surface.role {
+                        *should_close = true;
+                    }
+                }
                 _ => {}
             }
         }

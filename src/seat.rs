@@ -1,5 +1,7 @@
+use std::os::fd::AsFd;
+
 use kbvm::{
-    GroupIndex, Keycode, ModifierMask,
+    GroupIndex, ModifierMask,
     lookup::LookupTable,
     xkb::{Keymap, diagnostic::WriteToLog},
 };
@@ -7,20 +9,18 @@ use slotmap::new_key_type;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     protocol::{
-        wl_keyboard::{self, WlKeyboard},
-        wl_seat::WlSeat,
+        wl_keyboard::WlKeyboard,
+        wl_seat::{self, WlSeat},
     },
 };
 
 use crate::{
-    globals::GlobalData,
     mmap::Mmap,
     state::{Event, SeatEvent, State},
     surface::SurfaceId,
 };
 
 pub struct Keyboard {
-    keyboard: WlKeyboard,
     keymap: Option<Keymap>,
     pub(crate) lookup_table: Option<LookupTable>,
     focused_surface: Option<SurfaceId>,
@@ -42,20 +42,40 @@ impl Dispatch<WlSeat, State> for SeatId {
         &self,
         state: &mut State,
         proxy: &WlSeat,
-        event: <WlSeat as wayland_client::Proxy>::Event,
-        conn: &Connection,
+        event: <WlSeat as Proxy>::Event,
+        _conn: &Connection,
         qh: &QueueHandle<State>,
     ) {
-        let keyboard = proxy.get_keyboard(qh, *self);
-        let seat = state.seat_mut(*self);
+        // Any other seat event is not interesting, and must not be allowed to
+        // run the body below a second time.
+        let wl_seat::Event::Capabilities { capabilities } = event else {
+            return;
+        };
+
+        // Creating a second keyboard for the same seat would leak the first one
+        // and throw away its keymap and focus, so only ever do this once.
+        if !capabilities.contains(wl_seat::Capability::Keyboard) {
+            return;
+        }
+        let Some(seat) = state.seat_mut(*self) else {
+            return;
+        };
+        if seat.keyboard.is_some() {
+            return;
+        }
+
         seat.keyboard = Some(Keyboard {
-            keyboard,
             keymap: Default::default(),
             lookup_table: Default::default(),
             focused_surface: Default::default(),
             group: Default::default(),
             mods: Default::default(),
         });
+
+        // The proxy is deliberately not kept: nothing needs to send requests on
+        // it, and dropping a client-side proxy sends no request, so the
+        // compositor keeps the keyboard alive.
+        let _ = proxy.get_keyboard(qh, *self);
     }
 }
 
@@ -63,68 +83,90 @@ impl Dispatch<WlKeyboard, State> for SeatId {
     fn event(
         &self,
         state: &mut State,
-        proxy: &WlKeyboard,
-        event: <WlKeyboard as wayland_client::Proxy>::Event,
-        conn: &Connection,
-        qh: &QueueHandle<State>,
+        _proxy: &WlKeyboard,
+        event: <WlKeyboard as Proxy>::Event,
+        _conn: &Connection,
+        _qh: &QueueHandle<State>,
     ) {
         match event {
-            wayland_client::protocol::wl_keyboard::Event::Keymap { format, fd, size } => {
-                let keymap = {
-                    let mmap = Mmap::new(fd, size as usize).unwrap();
-                    state
-                        .xkb_ctx
-                        .keymap_from_bytes(WriteToLog, None, mmap.as_slice())
-                }
-                .unwrap();
+            wayland_client::protocol::wl_keyboard::Event::Keymap {
+                format: _,
+                fd,
+                size,
+            } => {
+                // The mapping outlives the fd, so `fd` is closed as soon as this
+                // scope ends.
+                let mmap = Mmap::new(fd.as_fd(), size as usize).unwrap();
+                let keymap = state
+                    .xkb_ctx
+                    .keymap_from_bytes(WriteToLog, None, mmap.as_slice())
+                    .unwrap();
                 let lookup_table = keymap.to_builder().build_lookup_table();
-                let keyboard = state.keyboard_mut(*self);
+                let Some(keyboard) = state.keyboard_mut(*self) else {
+                    return;
+                };
                 keyboard.keymap = Some(keymap);
                 keyboard.lookup_table = Some(lookup_table);
             }
-            wayland_client::protocol::wl_keyboard::Event::Enter {
-                serial,
-                surface,
-                keys,
-            } => {
+            wayland_client::protocol::wl_keyboard::Event::Enter { surface, .. } => {
                 let surface_id = surface.data::<SurfaceId>().unwrap();
-                let keyboard = state.keyboard_mut(*self);
+                let Some(keyboard) = state.keyboard_mut(*self) else {
+                    return;
+                };
                 keyboard.focused_surface = Some(*surface_id);
             }
-            wayland_client::protocol::wl_keyboard::Event::Leave { serial, surface } => {
-                let keyboard = state.keyboard_mut(*self);
+            wayland_client::protocol::wl_keyboard::Event::Leave { .. } => {
+                let Some(keyboard) = state.keyboard_mut(*self) else {
+                    return;
+                };
                 keyboard.focused_surface = None;
             }
             wayland_client::protocol::wl_keyboard::Event::Key {
-                serial,
                 time,
                 key,
                 state: key_state,
+                ..
             } => {
-                let keyboard = state.keyboard(*self);
+                let pressed = key_state == wayland_client::protocol::wl_keyboard::KeyState::Pressed;
+                let Some(keyboard) = state.keyboard(*self) else {
+                    return;
+                };
+                // Keys can only be delivered while a surface has focus, but a
+                // release can still race a `leave`, so report what we know.
+                let Some(surface) = keyboard.focused_surface else {
+                    return;
+                };
                 state.events.push_back(Event::SeatEvent {
                     id: *self,
                     event: SeatEvent::Key {
-                        surface: keyboard.focused_surface.unwrap(),
+                        surface,
                         time,
                         key,
+                        pressed,
                         group: keyboard.group,
                         mods: keyboard.mods,
                     },
                 });
             }
             wayland_client::protocol::wl_keyboard::Event::Modifiers {
-                serial,
                 mods_depressed,
                 mods_latched,
                 mods_locked,
                 group,
+                ..
             } => {
-                let keyboard = state.keyboard_mut(*self);
+                let Some(keyboard) = state.keyboard_mut(*self) else {
+                    return;
+                };
                 keyboard.group = GroupIndex(group);
                 keyboard.mods = ModifierMask(mods_depressed | mods_latched | mods_locked);
             }
-            wayland_client::protocol::wl_keyboard::Event::RepeatInfo { rate, delay } => {}
+            wayland_client::protocol::wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.events.push_back(Event::SeatEvent {
+                    id: *self,
+                    event: SeatEvent::RepeatInfo { rate, delay },
+                });
+            }
             _ => {}
         }
     }
